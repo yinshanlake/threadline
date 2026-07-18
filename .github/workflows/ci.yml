@@ -30,8 +30,4 @@ jobs:
           package=$(npm pack --silent)
           prefix="$RUNNER_TEMP/threadline-install"
           npm install --global --prefix "$prefix" "./$package"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            "$prefix/threadline.cmd" --demo --snapshot > /dev/null
-          else
-            "$prefix/bin/threadline" --demo --snapshot > /dev/null
-          fi
+          node "$prefix/node_modules/threadline/src/cli.mjs" --demo --snapshot > /dev/null
