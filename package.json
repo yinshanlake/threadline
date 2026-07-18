@@ -1,0 +1,44 @@
+{
+  "name": "threadline",
+  "version": "0.2.0",
+  "description": "Terminal-native deep-dive threads for LLM CLIs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yinshanlake/threadline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yinshanlake/threadline/issues"
+  },
+  "homepage": "https://github.com/yinshanlake/threadline#readme",
+  "keywords": [
+    "codex",
+    "cli",
+    "terminal",
+    "tui",
+    "llm"
+  ],
+  "type": "module",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "threadline": "./src/cli.mjs"
+  },
+  "scripts": {
+    "start": "node ./src/cli.mjs",
+    "demo": "node ./src/cli.mjs --demo",
+    "snapshot": "node ./src/cli.mjs --demo --snapshot",
+    "probe": "node ./src/cli.mjs --probe",
+    "test": "node --test",
+    "prepack": "npm test"
+  },
+  "dependencies": {
+    "@openai/codex": "^0.144.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
