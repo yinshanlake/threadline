@@ -24,3 +24,14 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm pack --dry-run
+      - name: Smoke-test the packaged CLI
+        shell: bash
+        run: |
+          package=$(npm pack --silent)
+          prefix="$RUNNER_TEMP/threadline-install"
+          npm install --global --prefix "$prefix" "./$package"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$prefix/threadline.cmd" --demo --snapshot > /dev/null
+          else
+            "$prefix/bin/threadline" --demo --snapshot > /dev/null
+          fi

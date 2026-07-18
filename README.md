@@ -10,10 +10,10 @@ Threadline is a small terminal UI for creating real deep-dive branches from indi
 
 ## Install
 
-Install directly from GitHub. This also installs the compatible Codex CLI dependency:
+Install the current `main` branch from GitHub's source archive. This also installs the compatible Codex CLI dependency:
 
 ```shell
-npm install --global github:yinshanlake/threadline
+npm install --global https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz
 codex login
 threadline --probe
 threadline --demo --new
@@ -23,7 +23,7 @@ threadline --new
 To try it without a global install:
 
 ```shell
-npx --yes github:yinshanlake/threadline --demo --new
+npx --yes --package=https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz threadline --demo --new
 ```
 
 To work from a clone:
