@@ -1,6 +1,6 @@
-import { findScope } from "./model.mjs";
+import { findScope, findStreamingTurn } from "./model.mjs";
 import { ansi, applyTone, approvalText, breadcrumb, buildConversationView, conversationStats, lineContainsSelection, overviewView, renderLine } from "./render.mjs";
-import { displayWidth, graphemes, sanitizeTerminalText, truncate } from "./text.mjs";
+import { displayWidth, graphemes, sanitizeTerminalText, truncate, wrapDisplayText } from "./text.mjs";
 import { Terminal } from "./terminal.mjs";
 
 function selectableKey(item) {
@@ -15,6 +15,7 @@ function selectableKey(item) {
   }
   if (item.kind === "branch") return `branch:${item.scopeId}`;
   if (item.kind === "activity") return `activity:${item.scopeId}:${item.turnId}:${item.activityId}`;
+  if (item.kind === "activity-group") return `activity-group:${item.groupId}`;
   return null;
 }
 
@@ -48,6 +49,20 @@ function composerLine(prefix, before, after, width, tone, colors) {
   return applyTone(prefix, tone, false, colors) + value;
 }
 
+function commandName(command) {
+  return String(command?.name ?? command?.command ?? "").replace(/^\//u, "");
+}
+
+function commandDescription(command) {
+  return String(command?.description ?? command?.purpose ?? "");
+}
+
+function modelEfforts(model) {
+  return Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+}
+
+const workingFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 export class TuiApp {
   constructor({ controller, noAltScreen = false, colors = true }) {
     this.controller = controller;
@@ -65,8 +80,13 @@ export class TuiApp {
     this.closed = false;
     this.resolve = null;
     this.drawTimer = null;
+    this.workingTimer = null;
     this.selectionKey = null;
     this.activityPages = new Map();
+    this.activityGroups = new Map();
+    this.commandSelection = 0;
+    this.commandOutput = null;
+    this.commandPicker = null;
     this.onChange = () => this.scheduleDraw();
     this.followTail = true;
     this.onKey = (key) => this.handleKey(key).catch((error) => { this.controller.status = error.message; this.draw(); });
@@ -79,12 +99,26 @@ export class TuiApp {
     this.controller.on("change", this.onChange);
     this.terminal.on("key", this.onKey);
     this.terminal.on("resize", this.onResize);
+    this.workingTimer = setInterval(() => { if (this.activeStreamingTurn()) this.draw(); }, 250);
+    this.workingTimer.unref?.();
     this.draw();
     try { await this.controller.start(); } catch (error) { this.controller.status = error.message; this.draw(); }
     return completion;
   }
 
   selected() { return this.view.selectables[this.selection] ?? null; }
+
+  activeStreamingTurn() {
+    const scope = findScope(this.controller.conversation, this.controller.conversation.activeScopeId);
+    return scope ? findStreamingTurn(this.controller.conversation, scope.id) : null;
+  }
+
+  workingText(turn) {
+    const started = Date.parse(turn?.createdAt ?? "");
+    const elapsed = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : 0;
+    const frame = workingFrames[Math.floor(Date.now() / 250) % workingFrames.length];
+    return `${frame} ${elapsed >= 15 ? "still waiting" : "working"} ${elapsed}s`;
+  }
 
   capacityFor(item) {
     if (item?.kind !== "segment" || typeof this.controller.threadCapacity !== "function") return null;
@@ -124,8 +158,27 @@ export class TuiApp {
     this.selectionKey = selectableKey(this.selected());
   }
 
+  enterBrowse() {
+    if (!this.view.selectables.length) {
+      this.controller.status = "Nothing to inspect yet";
+      this.draw();
+      return false;
+    }
+    this.mode = "browse";
+    this.selectLast();
+    this.draw();
+    return true;
+  }
+
   async handleKey(key) {
     if (key.name === "ctrl+c" || key.name === "ctrl+d") { await this.quit(); return; }
+    if (this.commandPicker) { await this.handleCommandPickerKey(key); return; }
+    if (this.commandOutput) {
+      if (["escape", "enter", "q"].includes(key.name.toLowerCase())) { this.commandOutput = null; this.draw(); return; }
+      if (["up", "pageup"].includes(key.name)) { this.commandOutput.scroll = Math.max(0, this.commandOutput.scroll - (key.name === "pageup" ? 8 : 1)); this.draw(); return; }
+      if (["down", "pagedown"].includes(key.name)) { this.commandOutput.scroll += key.name === "pagedown" ? 8 : 1; this.draw(); return; }
+      return;
+    }
     if (this.controller.pendingApproval) {
       if (key.name.toLowerCase() === "y") this.controller.answerApproval(true);
       else if (["n", "escape"].includes(key.name.toLowerCase())) this.controller.answerApproval(false);
@@ -136,8 +189,91 @@ export class TuiApp {
       await this.handleInputKey(key);
       return;
     }
+    if (key.name === "escape" && ["input", "dive-input"].includes(this.mode) && this.activeStreamingTurn()) {
+      await this.controller.interrupt();
+      this.mode = "input"; this.pendingDive = null; this.followTail = true;
+      this.draw(); return;
+    }
     if (this.mode === "input" || this.mode === "dive-input") { await this.handleInputKey(key); return; }
     await this.handleBrowseKey(key);
+  }
+
+  openCommandPicker(picker, title) {
+    if (picker?.kind !== "model" || !Array.isArray(picker.models) || !picker.models.length) return false;
+    const current = picker.models.findIndex((model) => model.model === picker.currentModel || model.id === picker.currentModel);
+    const fallback = picker.models.findIndex((model) => model.isDefault);
+    this.commandPicker = {
+      ...picker,
+      title: title || "Models",
+      step: "model",
+      modelSelection: current >= 0 ? current : Math.max(0, fallback),
+      effortSelection: 0,
+      scroll: 0,
+    };
+    this.commandOutput = null;
+    return true;
+  }
+
+  commandPickerItems() {
+    if (!this.commandPicker) return [];
+    if (this.commandPicker.step === "effort") return modelEfforts(this.commandPicker.models[this.commandPicker.modelSelection]);
+    return this.commandPicker.models;
+  }
+
+  commandPickerSelection() {
+    return this.commandPicker?.step === "effort" ? this.commandPicker.effortSelection : this.commandPicker?.modelSelection ?? 0;
+  }
+
+  setCommandPickerSelection(index) {
+    const items = this.commandPickerItems();
+    const selection = Math.min(Math.max(0, index), Math.max(0, items.length - 1));
+    if (this.commandPicker.step === "effort") this.commandPicker.effortSelection = selection;
+    else this.commandPicker.modelSelection = selection;
+  }
+
+  async handleCommandPickerKey(key) {
+    const name = key.name.toLowerCase();
+    if (name === "escape") {
+      if (this.commandPicker.step === "effort") {
+        this.commandPicker.step = "model";
+        this.commandPicker.scroll = 0;
+      } else this.commandPicker = null;
+      this.draw(); return;
+    }
+    const items = this.commandPickerItems();
+    const current = this.commandPickerSelection();
+    const page = Math.max(1, this.terminal.size().rows - 5);
+    if (name === "up") this.setCommandPickerSelection(current - 1);
+    else if (name === "down") this.setCommandPickerSelection(current + 1);
+    else if (name === "home") this.setCommandPickerSelection(0);
+    else if (name === "end") this.setCommandPickerSelection(items.length - 1);
+    else if (name === "pageup") this.setCommandPickerSelection(current - page);
+    else if (name === "pagedown") this.setCommandPickerSelection(current + page);
+    else if (name === "enter") {
+      const model = this.commandPicker.models[this.commandPicker.modelSelection];
+      if (this.commandPicker.step === "model") {
+        const efforts = modelEfforts(model);
+        if (!efforts.length) {
+          const result = await this.controller.executeSlashCommand(`/model ${model.model}`);
+          if (result?.message) this.controller.status = result.message;
+          this.commandPicker = null;
+        } else {
+          const preferred = model.model === this.commandPicker.currentModel ? this.commandPicker.currentEffort : model.defaultReasoningEffort;
+          const selected = efforts.findIndex((effort) => effort.reasoningEffort === preferred);
+          this.commandPicker.effortSelection = selected >= 0 ? selected : 0;
+          this.commandPicker.step = "effort";
+          this.commandPicker.scroll = 0;
+        }
+      } else {
+        const effort = modelEfforts(model)[this.commandPicker.effortSelection];
+        const suffix = effort?.reasoningEffort ? ` ${effort.reasoningEffort}` : "";
+        const result = await this.controller.executeSlashCommand(`/model ${model.model}${suffix}`);
+        if (result?.message) this.controller.status = result.message;
+        this.commandPicker = null;
+      }
+      this.draw(); return;
+    } else return;
+    this.draw();
   }
 
   async handleInputKey(key) {
@@ -146,8 +282,18 @@ export class TuiApp {
       else { this.mode = "browse"; this.selectLast(); }
       this.draw(); return;
     }
-    if (key.name === "tab") { this.mode = "browse"; this.selectLast(); this.draw(); return; }
-    if (key.name === "up" && !this.input) { this.mode = "browse"; this.selectLast(); this.draw(); return; }
+    const commandItems = this.commandItems();
+    if (commandItems.length && ["up", "down"].includes(key.name)) {
+      const direction = key.name === "down" ? 1 : -1;
+      this.commandSelection = (this.commandSelection + direction + commandItems.length) % commandItems.length;
+      this.draw(); return;
+    }
+    if (commandItems.length && key.name === "tab") {
+      const name = commandName(commandItems[this.commandSelection]);
+      this.input = `/${name} `; this.cursor = graphemes(this.input).length; this.draw(); return;
+    }
+    if (key.name === "tab") { this.enterBrowse(); return; }
+    if (key.name === "up" && !this.input) { this.enterBrowse(); return; }
     if (key.name === "left") { this.cursor = Math.max(0, this.cursor - 1); this.draw(); return; }
     if (key.name === "right") { this.cursor = Math.min(graphemes(this.input).length, this.cursor + 1); this.draw(); return; }
     if (key.name === "home") { this.cursor = 0; this.draw(); return; }
@@ -161,7 +307,7 @@ export class TuiApp {
       const chars = graphemes(this.input); chars.splice(this.cursor, 1); this.input = chars.join(""); this.draw(); return;
     }
     if (key.name === "enter") {
-      const text = this.input.trim();
+      let text = this.input.trim();
       if (!text && !this.controller.pendingUserInput) return;
       if (this.controller.pendingUserInput) {
         this.input = ""; this.cursor = 0; this.controller.answerUserInput(text);
@@ -169,6 +315,24 @@ export class TuiApp {
         this.draw(); return;
       }
       const mode = this.mode; const dive = this.pendingDive;
+      if (mode === "input" && commandItems.length) {
+        const typed = text.slice(1).toLowerCase();
+        const exact = commandItems.find((command) => commandName(command).toLowerCase() === typed);
+        if (!exact) text = `/${commandName(commandItems[this.commandSelection])}`;
+      }
+      if (mode === "input" && text.startsWith("/") && typeof this.controller.executeSlashCommand === "function") {
+        this.input = ""; this.cursor = 0; this.commandSelection = 0; this.followTail = true;
+        try {
+          const result = await this.controller.executeSlashCommand(text);
+          if (result?.handled === false) this.controller.status = `Unknown command: ${text.split(/\s/u, 1)[0]}. Type /help.`;
+          else if (result?.message) this.controller.status = result.message;
+          if (result?.picker && this.openCommandPicker(result.picker, result.title)) this.commandOutput = null;
+          else if (result?.output) this.commandOutput = { title: result.title || text.split(/\s/u, 1)[0], text: result.output, scroll: 0 };
+          if (result?.action === "threads") { this.mode = "overview"; this.selection = 0; this.scroll = 0; }
+          if (result?.quit) await this.quit();
+        } catch (error) { this.controller.status = error.message; }
+        this.draw(); return;
+      }
       this.input = ""; this.cursor = 0; this.mode = "input"; this.pendingDive = null; this.followTail = true;
       this.draw();
       if (mode === "dive-input" && dive) {
@@ -188,7 +352,17 @@ export class TuiApp {
     }
     if (key.text) {
       const chars = graphemes(this.input); const incoming = graphemes(key.text); chars.splice(this.cursor, 0, ...incoming); this.cursor += incoming.length; this.input = chars.join(""); this.draw();
+      this.commandSelection = 0;
     }
+  }
+
+  commandItems() {
+    if (this.controller.pendingApproval || this.controller.pendingUserInput) return [];
+    if (this.mode !== "input" || !this.input.startsWith("/") || this.input.slice(1).includes(" ")) return [];
+    const commands = typeof this.controller.slashCommands === "function" ? this.controller.slashCommands() : [];
+    const filter = this.input.slice(1).toLowerCase();
+    const visibleLimit = Math.max(0, Math.min(8, (this.terminal.size?.().rows ?? 24) - 3));
+    return commands.filter((command) => commandName(command).toLowerCase().startsWith(filter)).slice(0, visibleLimit);
   }
 
   async handleBrowseKey(key) {
@@ -224,6 +398,11 @@ export class TuiApp {
         if (activity && ((name === "right" && !activity.expanded) || (name === "left" && activity.expanded))) {
           this.controller.toggleActivity(selected.scopeId, selected.turnId, selected.activityId);
         }
+      } else if (selected?.kind === "activity-group") {
+        if ((name === "right" && !selected.expanded) || (name === "left" && selected.expanded)) {
+          this.activityGroups.set(selected.groupId, !selected.expanded);
+          this.draw();
+        }
       }
       return;
     }
@@ -231,6 +410,7 @@ export class TuiApp {
       if (selected?.kind === "branch-group") this.controller.toggleBranches(selected.parentScopeId, selected.anchor);
       else if (selected?.kind === "branch") { const scope = findScope(this.controller.conversation, selected.scopeId); if (scope?.anchor) this.controller.toggleBranches(scope.parentId, scope.anchor); }
       else if (selected?.kind === "activity") this.controller.toggleActivity(selected.scopeId, selected.turnId, selected.activityId);
+      else if (selected?.kind === "activity-group") { this.activityGroups.set(selected.groupId, !selected.expanded); this.draw(); }
       return;
     }
     if (name === "enter") {
@@ -238,6 +418,7 @@ export class TuiApp {
       if (selected?.kind === "branch") { this.controller.setActiveScope(selected.scopeId); this.mode = "input"; this.selection = 0; this.scroll = 0; return; }
       if (selected?.kind === "branch-group") { this.controller.toggleBranches(selected.parentScopeId, selected.anchor); return; }
       if (selected?.kind === "activity") { this.controller.toggleActivity(selected.scopeId, selected.turnId, selected.activityId); return; }
+      if (selected?.kind === "activity-group") { this.activityGroups.set(selected.groupId, !selected.expanded); this.draw(); return; }
     }
     if (this.mode === "browse" && selected?.kind === "segment" && key.text && !key.ctrl && !key.meta) {
       this.startDive(selected, key.text);
@@ -285,14 +466,65 @@ export class TuiApp {
     const gap = Math.max(1, width - displayWidth(headerLeft) - displayWidth(headerRight));
     const headerText = truncate(headerLeft + " ".repeat(gap) + headerRight, width);
     const header = this.colors ? ansi.bold + headerText + ansi.reset : headerText;
+    if (this.commandPicker) {
+      const picker = this.commandPicker;
+      const items = this.commandPickerItems();
+      const selection = this.commandPickerSelection();
+      const bodyHeight = Math.max(1, rows - 3);
+      const maxScroll = Math.max(0, items.length - bodyHeight);
+      if (selection < picker.scroll) picker.scroll = selection;
+      if (selection >= picker.scroll + bodyHeight) picker.scroll = selection - bodyHeight + 1;
+      picker.scroll = Math.min(Math.max(0, picker.scroll), maxScroll);
+      const selectedModel = picker.models[picker.modelSelection];
+      const title = picker.step === "effort" ? `Reasoning effort · ${selectedModel.displayName ?? selectedModel.model}` : picker.title;
+      const body = items.slice(picker.scroll, picker.scroll + bodyHeight).map((item, offset) => {
+        const index = picker.scroll + offset;
+        let label;
+        let description;
+        let badge = "";
+        if (picker.step === "effort") {
+          label = item.reasoningEffort;
+          description = item.description ?? "";
+          if (item.reasoningEffort === selectedModel.defaultReasoningEffort) badge = "  default";
+          if (selectedModel.model === picker.currentModel && item.reasoningEffort === picker.currentEffort) badge = "  current";
+        } else {
+          label = item.displayName && item.displayName !== item.model ? `${item.displayName} (${item.model})` : item.model;
+          description = item.description ?? "";
+          if (item.model === picker.currentModel || item.id === picker.currentModel) badge = "  current";
+          else if (item.isDefault) badge = "  default";
+        }
+        const marker = index === selection ? " › " : "   ";
+        const detail = description ? ` — ${description}` : "";
+        const line = " ".repeat(Math.max(0, contentInset - 1)) + truncate(`${marker}${label}${badge}${detail}`, Math.max(1, width - contentInset));
+        return index === selection ? applyTone(line, "thread", true, this.colors) : applyTone(line, "dim", false, this.colors);
+      });
+      while (body.length < bodyHeight) body.push("");
+      const step = picker.step === "effort" ? "2/2" : "1/2";
+      this.terminal.draw([header, applyTone(` ${title}  ${step}`, "thread", false, this.colors), ...body, applyTone(` ↑↓ choose   Enter ${picker.step === "effort" ? "apply" : "continue"}   Esc ${picker.step === "effort" ? "back" : "close"}`, "dim", false, this.colors)]);
+      return;
+    }
+    if (this.commandOutput) {
+      const panelWidth = Math.max(10, contentWidth - 2);
+      const lines = wrapDisplayText(sanitizeTerminalText(this.commandOutput.text), panelWidth);
+      const bodyHeight = Math.max(1, rows - 4);
+      const maxScroll = Math.max(0, lines.length - bodyHeight);
+      this.commandOutput.scroll = Math.min(Math.max(0, this.commandOutput.scroll), maxScroll);
+      const body = lines.slice(this.commandOutput.scroll, this.commandOutput.scroll + bodyHeight).map((line) => " ".repeat(contentInset) + line);
+      while (body.length < bodyHeight) body.push("");
+      const position = lines.length > bodyHeight ? `  ${this.commandOutput.scroll + 1}-${Math.min(lines.length, this.commandOutput.scroll + bodyHeight)}/${lines.length}` : "";
+      this.terminal.draw([header, applyTone(` ${this.commandOutput.title}${position}`, "thread", false, this.colors), ...body, applyTone(" ↑↓ scroll   Esc / Enter close", "dim", false, this.colors)]);
+      return;
+    }
     const previousKey = this.selectionKey;
-    this.view = this.mode === "overview" ? overviewView(conversation, contentWidth) : buildConversationView(conversation, { width: contentWidth, scopeId: activeScope?.id, granularity: this.inspectGranularity, activityPages: this.activityPages });
+    this.view = this.mode === "overview" ? overviewView(conversation, contentWidth) : buildConversationView(conversation, { width: contentWidth, scopeId: activeScope?.id, granularity: this.inspectGranularity, activityPages: this.activityPages, activityGroups: this.activityGroups });
     const stableIndex = previousKey ? this.view.selectables.findIndex((item) => selectableKey(item) === previousKey) : -1;
     if (stableIndex >= 0) this.selection = stableIndex;
     else this.selection = Math.min(this.selection, Math.max(0, this.view.selectables.length - 1));
     this.selectionKey = selectableKey(this.selected());
 
-    const footerCount = 2;
+    const commandItems = this.commandItems();
+    if (this.commandSelection >= commandItems.length) this.commandSelection = Math.max(0, commandItems.length - 1);
+    const footerCount = 2 + commandItems.length;
     const bodyHeight = Math.max(0, rows - 1 - footerCount);
     const maxScroll = Math.max(0, this.view.lines.length - bodyHeight);
     if (this.mode === "input" && this.followTail) this.scroll = maxScroll;
@@ -302,6 +534,7 @@ export class TuiApp {
     while (body.length < bodyHeight) body.push("");
 
     let prompt; let helpText; let helpTone = "dim";
+    const streamingTurn = this.activeStreamingTurn();
     if (this.controller.pendingUserInput && !this.savedDraft) {
       this.savedDraft = { input: this.input, cursor: this.cursor, mode: this.mode, pendingDive: this.pendingDive };
       this.input = ""; this.cursor = 0; this.mode = "input"; this.pendingDive = null;
@@ -331,33 +564,48 @@ export class TuiApp {
             : "type to ask here"
         : selected?.kind === "activity"
           ? `Enter details${selected.pages > 1 ? "   [ ] page" : ""}`
+          : selected?.kind === "activity-group"
+            ? "Enter activities"
           : selected?.kind === "branch-group"
             ? "←→ fold"
             : "Enter open";
       const modeLabel = this.mode === "overview" ? "threads" : `inspect ${this.inspectGranularity}`;
       const position = this.view.selectables.length ? `  ${this.selection + 1}/${this.view.selectables.length}` : "";
       prompt = applyTone(` ${modeLabel}${position}`, "thread", false, this.colors);
-      helpText = truncate(` ↑↓ move   ${action}   V detail   T threads   Esc compose`, width);
+      helpText = truncate(` Esc back to input   ↑↓ move   ${action}   V detail   T threads`, width);
     } else {
       const context = this.mode === "dive-input" ? truncate(sanitizeTerminalText(this.pendingDive?.segment?.text || "selection"), 24) : "";
       const label = context ? ` ask here  ${context}  › ` : `${" ".repeat(contentInset)}› `;
       const before = graphemes(this.input).slice(0, this.cursor).join("");
       const after = graphemes(this.input).slice(this.cursor).join("");
       prompt = composerLine(label, before, after, width, context ? "thread" : "dim", this.colors);
-      helpText = truncate(" Enter send   ↑ / Tab inspect   Ctrl+C quit", width);
+      helpText = truncate(streamingTurn
+        ? ` Esc stop   ${this.workingText(streamingTurn)}   Ctrl+C quit`
+        : this.view.selectables.length
+          ? " Enter send   ↑ / Tab inspect   Ctrl+C quit"
+          : " Enter send   Type / for commands   Ctrl+C quit", width);
     }
     const safeStatus = sanitizeTerminalText(this.controller.status);
     const statusTone = safeStatus.toLowerCase().includes("error") || safeStatus.toLowerCase().includes("failed") ? "error" : "dim";
     const statusText = truncate(safeStatus, Math.max(0, width - displayWidth(helpText) - 2));
     const footerGap = Math.max(0, width - displayWidth(helpText) - displayWidth(statusText));
     const footer = applyTone(helpText, helpTone, false, this.colors) + " ".repeat(footerGap) + applyTone(statusText, statusTone, false, this.colors);
-    this.terminal.draw([header, ...body, prompt, footer]);
+    const commandMenu = commandItems.map((command, index) => {
+      const marker = index === this.commandSelection ? " › " : "   ";
+      const usage = command.usage ? ` ${command.usage}` : "";
+      const name = `/${commandName(command)}${usage}`;
+      const gap = Math.max(1, 24 - displayWidth(name));
+      const line = truncate(`${marker}${name}${" ".repeat(gap)}${commandDescription(command)}`, width);
+      return index === this.commandSelection ? applyTone(line, "thread", true, this.colors) : applyTone(line, "dim", false, this.colors);
+    });
+    this.terminal.draw([header, ...body, ...commandMenu, prompt, footer]);
   }
 
   async quit() {
     if (this.closed) return;
     this.closed = true;
     if (this.drawTimer) { clearTimeout(this.drawTimer); this.drawTimer = null; }
+    if (this.workingTimer) { clearInterval(this.workingTimer); this.workingTimer = null; }
     this.controller.off("change", this.onChange); this.terminal.off("key", this.onKey); this.terminal.off("resize", this.onResize);
     this.terminal.stop();
     try { await this.controller.close(); } finally { this.resolve?.(); }

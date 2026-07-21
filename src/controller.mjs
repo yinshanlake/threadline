@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { executeSlashCommand, SLASH_COMMANDS } from "./commands.mjs";
 import {
   addBranch,
   addTurn,
@@ -47,6 +48,22 @@ export class Controller extends EventEmitter {
     return info;
   }
 
+  slashCommands() { return SLASH_COMMANDS; }
+
+  async executeSlashCommand(input) {
+    const result = await executeSlashCommand(this, input);
+    if (result?.message) this.status = result.message;
+    this.changed();
+    return result;
+  }
+
+  addCommandTurn(scopeId, text) {
+    const turn = addTurn(this.conversation, scopeId, text);
+    this.status = "Codex is working…";
+    this.changed();
+    return turn;
+  }
+
   async ensureScope(scopeId) {
     const scope = findScope(this.conversation, scopeId);
     if (!scope) throw new Error(`Unknown scope: ${scopeId}`);
@@ -56,9 +73,11 @@ export class Controller extends EventEmitter {
       if (scope.providerThreadId) {
         const resumed = await this.provider.resumeThread(scope.providerThreadId, { cwd: this.conversation.cwd });
         scope.providerThreadId = resumed.threadId;
+        scope.providerState = { ...scope.providerState, ...(resumed.state ?? {}) };
       } else {
         const started = await this.provider.startThread({ cwd: this.conversation.cwd });
         scope.providerThreadId = started.threadId;
+        scope.providerState = { ...scope.providerState, ...(started.state ?? {}) };
       }
       this.loadedThreads.add(scope.providerThreadId);
       this.persist();
@@ -134,6 +153,7 @@ export class Controller extends EventEmitter {
       const parent = await this.ensureScope(parentScopeId);
       const fork = await this.provider.forkThread(parent.providerThreadId, sourceTurn.providerTurnId, { cwd: this.conversation.cwd });
       const child = addBranch(this.conversation, parentScopeId, anchor, fork.threadId);
+      child.providerState = { ...child.providerState, ...(fork.state ?? {}) };
       this.loadedThreads.add(fork.threadId);
       this.persist();
       const focusedPrompt = [
@@ -231,8 +251,23 @@ export class Controller extends EventEmitter {
   async interrupt() {
     const scope = findScope(this.conversation, this.conversation.activeScopeId);
     const turn = scope ? findStreamingTurn(this.conversation, scope.id) : null;
-    if (scope?.providerThreadId && turn?.providerTurnId) {
+    if (!scope?.providerThreadId || !turn?.providerTurnId) return false;
+    this.status = "Interrupting Codex…";
+    this.changed();
+    try {
       await this.provider.interrupt(scope.providerThreadId, turn.providerTurnId);
+      if (turn.assistant.status === "streaming") {
+        completeTurn(this.conversation, scope.id, turn.id, "interrupted");
+        this.busyScopes.delete(scope.id);
+        this.status = "Turn interrupted";
+        this.persist();
+        this.changed();
+      }
+      return true;
+    } catch (error) {
+      this.status = `Could not interrupt: ${error.message}`;
+      this.changed();
+      throw error;
     }
   }
 
@@ -270,6 +305,16 @@ export class Controller extends EventEmitter {
   }
 
   #wireProvider() {
+    this.provider.on("turn-start", (event) => {
+      const scope = this.conversation.scopes.find((candidate) => candidate.providerThreadId === event.threadId);
+      if (!scope || !event.turnId) return;
+      const pending = findStreamingTurn(this.conversation, scope.id);
+      if (pending && !pending.providerTurnId) {
+        pending.providerTurnId = event.turnId;
+        this.persist(); this.changed();
+      }
+    });
+
     this.provider.on("delta", (event) => {
       const { scope, turn } = this.#scopeAndTurn(event.threadId, event.turnId);
       if (!scope || !turn) return;
@@ -349,6 +394,9 @@ export class Controller extends EventEmitter {
       if (!scope || !turn) return;
       const status = event.status === "completed" ? "complete" : (event.status || "failed");
       completeTurn(this.conversation, scope.id, turn.id, status);
+      for (const activity of turn.assistant.activities ?? []) {
+        if (["inProgress", "running"].includes(activity.status)) activity.status = status === "complete" ? "completed" : status;
+      }
       this.busyScopes.delete(scope.id);
       if (event.error?.message) {
         upsertAssistantMessage(this.conversation, scope.id, turn.id, `error-${event.turnId}`, { text: `[${event.error.message}]`, phase: "commentary" });
@@ -356,6 +404,36 @@ export class Controller extends EventEmitter {
       this.status = status === "complete" ? "Ready" : `Turn ${status}`;
       this.persist();
       this.changed();
+    });
+
+    this.provider.on("thread-settings", (event) => {
+      const scope = this.conversation.scopes.find((candidate) => candidate.providerThreadId === event.threadId);
+      if (!scope) return;
+      const settings = event.settings ?? {};
+      const profile = settings.activePermissionProfile ?? scope.providerState?.activePermissionProfile ?? null;
+      scope.providerState = {
+        ...scope.providerState,
+        model: settings.model ?? scope.providerState?.model ?? null,
+        modelProvider: settings.modelProvider ?? scope.providerState?.modelProvider ?? null,
+        serviceTier: settings.serviceTier ?? scope.providerState?.serviceTier ?? null,
+        cwd: settings.cwd ?? scope.providerState?.cwd ?? null,
+        approvalPolicy: settings.approvalPolicy ?? scope.providerState?.approvalPolicy ?? null,
+        approvalsReviewer: settings.approvalsReviewer ?? scope.providerState?.approvalsReviewer ?? null,
+        sandbox: settings.sandboxPolicy ?? scope.providerState?.sandbox ?? null,
+        activePermissionProfile: profile,
+        permissions: profile?.id ?? scope.providerState?.permissions ?? null,
+        effort: settings.effort ?? settings.reasoningEffort ?? scope.providerState?.effort ?? null,
+        personality: settings.personality ?? scope.providerState?.personality ?? null,
+        collaborationMode: settings.collaborationMode ?? scope.providerState?.collaborationMode ?? null,
+      };
+      this.persist(); this.changed();
+    });
+
+    this.provider.on("token-usage", (event) => {
+      const scope = this.conversation.scopes.find((candidate) => candidate.providerThreadId === event.threadId);
+      if (!scope) return;
+      scope.tokenUsage = event.tokenUsage;
+      this.persist(); this.changed();
     });
 
     this.provider.on("server-request", (request) => {

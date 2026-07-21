@@ -29,8 +29,8 @@
   },
   "scripts": {
     "start": "node ./src/cli.mjs",
-    "demo": "node ./src/cli.mjs --demo",
-    "snapshot": "node ./src/cli.mjs --demo --snapshot",
+    "demo": "node ./src/cli.mjs demo",
+    "snapshot": "node ./src/cli.mjs demo --snapshot",
     "probe": "node ./src/cli.mjs --probe",
     "test": "node --test",
     "prepack": "npm test"
