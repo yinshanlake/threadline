@@ -17,6 +17,54 @@ class FakeProvider extends EventEmitter {
   async close() {}
 }
 
+test("slash commands are dispatched locally instead of becoming model prompts", async () => {
+  const provider = new FakeProvider();
+  provider.request = async (method) => method === "model/list" ? { data: [{ id: "test-model", model: "test-model", displayName: "Test", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "medium" }], defaultReasoningEffort: "medium" }] } : {};
+  provider.updateThreadSettings = async (threadId, settings) => { provider.settingsCall = { threadId, settings }; };
+  const conversation = createConversation();
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/model test-model medium");
+
+  assert.equal(result.handled, true);
+  assert.deepEqual(provider.settingsCall, { threadId: "provider-root", settings: { model: "test-model", effort: "medium" } });
+  assert.equal(rootScope(conversation).turns.length, 0);
+});
+
+test("model listing includes structured picker data for the full-screen TUI", async () => {
+  const provider = new FakeProvider();
+  const models = [{ id: "test-model", model: "test-model", displayName: "Test", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "medium" }], defaultReasoningEffort: "medium" }];
+  provider.request = async () => ({ data: models });
+  const conversation = createConversation();
+  const controller = new Controller({ conversation, provider });
+  await controller.ensureScope(rootScope(conversation).id);
+  rootScope(conversation).providerState = { model: "test-model", effort: "medium" };
+
+  const result = await controller.executeSlashCommand("/model");
+
+  assert.equal(result.output.includes("test-model"), true);
+  assert.deepEqual(result.picker, { kind: "model", models, currentModel: "test-model", currentEffort: "medium" });
+});
+
+test("Codex-TUI-only slash commands fail explicitly and are not sent", async () => {
+  const provider = new FakeProvider();
+  const controller = new Controller({ conversation: createConversation(), provider });
+  const result = await controller.executeSlashCommand("/theme");
+  assert.match(result.output, /original Codex TUI/);
+  assert.equal(provider.sendCalls, undefined);
+});
+
+test("turn started notification binds protocol-driven command turns", () => {
+  const provider = new FakeProvider();
+  const conversation = createConversation();
+  const scope = rootScope(conversation);
+  scope.providerThreadId = "provider-root";
+  const controller = new Controller({ conversation, provider });
+  const turn = controller.addCommandTurn(scope.id, "/review");
+  provider.emit("turn-start", { threadId: "provider-root", turnId: "review-turn" });
+  assert.equal(turn.providerTurnId, "review-turn");
+});
+
 function completedSource(conversation) {
   const scope = rootScope(conversation);
   scope.providerThreadId = "provider-root";
@@ -56,6 +104,23 @@ test("a scope cannot start two concurrent turns", async () => {
   const scope = rootScope(conversation);
   await controller.send(scope.id, "first");
   await assert.rejects(controller.send(scope.id, "second"), /Wait for the current operation/);
+});
+
+test("interrupt stops the active turn and releases the scope even without a completion event", async () => {
+  const provider = new FakeProvider();
+  provider.interrupt = async (threadId, turnId) => { provider.interruptCall = { threadId, turnId }; };
+  const conversation = createConversation();
+  const controller = new Controller({ conversation, provider });
+  const scope = rootScope(conversation);
+  const turn = await controller.send(scope.id, "a stalled question");
+
+  const interrupted = await controller.interrupt();
+
+  assert.equal(interrupted, true);
+  assert.deepEqual(provider.interruptCall, { threadId: "provider-root", turnId: "provider-turn" });
+  assert.equal(turn.assistant.status, "interrupted");
+  assert.equal(controller.busyScopes.has(scope.id), false);
+  assert.equal(controller.status, "Turn interrupted");
 });
 
 test("user message lifecycle items are not shown as tool activities", async () => {
@@ -118,4 +183,30 @@ test("an identical follow-up does not create another provider thread", async () 
 
   await assert.rejects(controller.dive(scope.id, turn.id, segment, "  why   exactly?  "), (error) => error.code === "duplicate-thread" && error.scopeId === child.id);
   assert.equal(provider.forkCalls ?? 0, 0);
+});
+
+test("a nested thread forks from the selected child answer context", async () => {
+  const provider = new FakeProvider();
+  provider.forkThread = async (threadId, turnId) => {
+    provider.forkArguments = { threadId, turnId };
+    return { threadId: "nested-provider-thread" };
+  };
+  const conversation = createConversation();
+  const root = rootScope(conversation);
+  root.providerThreadId = "provider-root";
+  const rootTurn = addTurn(conversation, root.id, "root question");
+  rootTurn.providerTurnId = "root-provider-turn";
+  rootTurn.assistant.text = "Root answer.";
+  rootTurn.assistant.status = "complete";
+  const child = addBranch(conversation, root.id, makeAnchor(rootTurn, segmentsForTurn(rootTurn)[0]), "provider-child");
+  const childTurn = addTurn(conversation, child.id, "child question");
+  childTurn.providerTurnId = "child-provider-turn";
+  childTurn.assistant.text = "Child answer with another idea.";
+  childTurn.assistant.status = "complete";
+  const controller = new Controller({ conversation, provider });
+
+  const nested = await controller.dive(child.id, childTurn.id, segmentsForTurn(childTurn)[0], "go deeper");
+
+  assert.deepEqual(provider.forkArguments, { threadId: "provider-child", turnId: "child-provider-turn" });
+  assert.equal(nested.parentId, child.id);
 });

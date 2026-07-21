@@ -6,8 +6,31 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_TIMEOUT = 30_000;
+function threadlineConfigOverrides(yolo) {
+  const overrides = ["-c", "mcp_servers.ado.enabled=false"];
+  if (yolo) overrides.push("-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"');
+  return overrides;
+}
 const require = createRequire(import.meta.url);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+
+function threadState(response = {}) {
+  const profile = response.activePermissionProfile ?? null;
+  return {
+    model: response.model ?? null,
+    modelProvider: response.modelProvider ?? null,
+    serviceTier: response.serviceTier ?? null,
+    cwd: response.cwd ?? null,
+    approvalPolicy: response.approvalPolicy ?? null,
+    approvalsReviewer: response.approvalsReviewer ?? null,
+    sandbox: response.sandbox ?? null,
+    activePermissionProfile: profile,
+    permissions: profile?.id ?? null,
+    effort: response.reasoningEffort ?? null,
+    personality: response.personality ?? null,
+    collaborationMode: response.collaborationMode ?? null,
+  };
+}
 
 function bundledCodex() {
   try {
@@ -18,16 +41,17 @@ function bundledCodex() {
   }
 }
 
-function defaultCommand() {
+function defaultCommand({ yolo = false } = {}) {
+  const overrides = threadlineConfigOverrides(yolo);
   const explicit = process.env.THREADLINE_CODEX_PATH;
   if (explicit) {
     const resolved = path.resolve(explicit);
     if (!existsSync(resolved)) throw new Error(`THREADLINE_CODEX_PATH does not exist: ${resolved}`);
-    if (resolved.toLowerCase().endsWith(".js")) return { file: process.execPath, args: [resolved, "app-server", "--stdio"] };
-    return { file: resolved, args: ["app-server", "--stdio"] };
+    if (resolved.toLowerCase().endsWith(".js")) return { file: process.execPath, args: [resolved, "app-server", "--stdio", ...overrides] };
+    return { file: resolved, args: ["app-server", "--stdio", ...overrides] };
   }
   const bundled = bundledCodex();
-  if (bundled) return { file: process.execPath, args: [bundled, "app-server", "--stdio"] };
+  if (bundled) return { file: process.execPath, args: [bundled, "app-server", "--stdio", ...overrides] };
   if (process.platform === "win32") {
     const directories = (process.env.Path || process.env.PATH || "").split(path.delimiter).filter((entry) => entry && path.isAbsolute(entry));
     const candidates = directories.flatMap((directory) => [
@@ -37,18 +61,19 @@ function defaultCommand() {
     if (process.env.APPDATA) candidates.push(path.join(process.env.APPDATA, "npm", "node_modules", "@openai", "codex", "bin", "codex.js"));
     for (const candidate of candidates) {
       if (!existsSync(candidate)) continue;
-      if (candidate.toLowerCase().endsWith(".js")) return { file: process.execPath, args: [candidate, "app-server", "--stdio"] };
-      return { file: candidate, args: ["app-server", "--stdio"] };
+      if (candidate.toLowerCase().endsWith(".js")) return { file: process.execPath, args: [candidate, "app-server", "--stdio", ...overrides] };
+      return { file: candidate, args: ["app-server", "--stdio", ...overrides] };
     }
     throw new Error("Could not locate Codex. Reinstall Threadline or set THREADLINE_CODEX_PATH to codex.exe or codex.js.");
   }
-  return { file: "codex", args: ["app-server", "--stdio"] };
+  return { file: "codex", args: ["app-server", "--stdio", ...overrides] };
 }
 
 export class CodexProvider extends EventEmitter {
-  constructor({ command = defaultCommand(), cwd = process.cwd(), requestTimeout = DEFAULT_TIMEOUT } = {}) {
+  constructor({ command = null, cwd = process.cwd(), requestTimeout = DEFAULT_TIMEOUT, yolo = false } = {}) {
     super();
-    this.command = command;
+    this.command = command ?? defaultCommand({ yolo });
+    this.yolo = yolo;
     this.cwd = cwd;
     this.requestTimeout = requestTimeout;
     this.child = null;
@@ -139,6 +164,7 @@ export class CodexProvider extends EventEmitter {
       threadId: response.thread.id,
       model: response.model,
       cwd: response.cwd,
+      state: threadState(response),
       raw: response
     };
   }
@@ -146,7 +172,7 @@ export class CodexProvider extends EventEmitter {
   async resumeThread(threadId, { cwd = this.cwd } = {}) {
     await this.connect();
     const response = await this.request("thread/resume", { threadId, cwd, threadSource: "threadline" });
-    return { threadId: response.thread.id, raw: response };
+    return { threadId: response.thread.id, state: threadState(response), raw: response };
   }
 
   async forkThread(threadId, lastTurnId, { cwd = this.cwd, ephemeral = false } = {}) {
@@ -154,7 +180,28 @@ export class CodexProvider extends EventEmitter {
     const params = { threadId, cwd, ephemeral, threadSource: "threadline" };
     if (lastTurnId) params.lastTurnId = lastTurnId;
     const response = await this.request("thread/fork", params);
-    return { threadId: response.thread.id, raw: response };
+    return { threadId: response.thread.id, state: threadState(response), raw: response };
+  }
+
+  async updateThreadSettings(threadId, settings) {
+    await this.connect();
+    return this.request("thread/settings/update", { threadId, ...settings });
+  }
+
+  async compactThread(threadId) {
+    await this.connect();
+    return this.request("thread/compact/start", { threadId });
+  }
+
+  async setThreadName(threadId, name) {
+    await this.connect();
+    return this.request("thread/name/set", { threadId, name });
+  }
+
+  async startReview(threadId, target) {
+    await this.connect();
+    const response = await this.request("review/start", { threadId, target });
+    return { turnId: response.turn.id, threadId: response.reviewThreadId, raw: response };
   }
 
   async send(threadId, text) {
@@ -312,6 +359,26 @@ export class CodexProvider extends EventEmitter {
           turnId: params.turn?.id,
           status: params.turn?.status,
           error: params.turn?.error
+        });
+        break;
+      case "turn/started":
+        this.emit("turn-start", {
+          threadId: params.threadId,
+          turnId: params.turn?.id,
+          turn: params.turn,
+        });
+        break;
+      case "thread/settings/updated":
+        this.emit("thread-settings", {
+          threadId: params.threadId,
+          settings: params.threadSettings ?? {},
+        });
+        break;
+      case "thread/tokenUsage/updated":
+        this.emit("token-usage", {
+          threadId: params.threadId,
+          turnId: params.turnId,
+          tokenUsage: params.tokenUsage ?? {},
         });
         break;
       case "error":

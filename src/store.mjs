@@ -12,6 +12,18 @@ function dataHome() {
   return path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "threadline");
 }
 
+export function normalizeSessionId(value) {
+  const sessionId = String(value ?? "").trim().replace(/^conversation_/u, "").toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(sessionId)) {
+    throw new Error(`Invalid Threadline session GUID: ${value}`);
+  }
+  return sessionId;
+}
+
+export function sessionIdPath(sessionId, provider = "codex") {
+  return path.join(dataHome(), "sessions", `${provider}-${normalizeSessionId(sessionId)}.json`);
+}
+
 export function defaultSessionPath(cwd = process.cwd(), provider = "codex") {
   const resolved = path.resolve(cwd);
   const keySource = process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -42,8 +54,10 @@ export async function saveConversation(file, conversation) {
 }
 
 export class SessionWriter {
-  constructor(file, readConversation, onError = null) {
-    this.file = file;
+  constructor(files, readConversation, onError = null) {
+    const values = (Array.isArray(files) ? files : [files]).filter(Boolean).map((file) => path.resolve(file));
+    this.files = [...new Set(values)];
+    this.file = this.files[0] ?? null;
     this.readConversation = readConversation;
     this.onError = onError;
     this.timer = null;
@@ -59,7 +73,7 @@ export class SessionWriter {
     clearTimeout(this.timer);
     this.timer = null;
     const snapshot = structuredClone(this.readConversation());
-    this.pending = this.pending.catch(() => {}).then(() => saveConversation(this.file, snapshot));
+    this.pending = this.pending.catch(() => {}).then(() => Promise.all(this.files.map((file) => saveConversation(file, snapshot))));
     return this.pending;
   }
 }

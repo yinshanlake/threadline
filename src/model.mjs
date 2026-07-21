@@ -27,10 +27,13 @@ export function normalizeThreadLimits(value = {}) {
 }
 
 export function createConversation({ provider = "codex", cwd = process.cwd(), title = "Threadline" } = {}) {
+  const sessionId = randomUUID();
   const root = {
     id: id("scope"),
     parentId: null,
     providerThreadId: null,
+    providerState: {},
+    tokenUsage: null,
     anchor: null,
     collapsed: false,
     turns: []
@@ -38,7 +41,8 @@ export function createConversation({ provider = "codex", cwd = process.cwd(), ti
   const now = new Date().toISOString();
   return {
     version: 2,
-    id: id("conversation"),
+    id: `conversation_${sessionId}`,
+    sessionId,
     provider,
     cwd,
     title,
@@ -54,9 +58,17 @@ export function normalizeConversation(value) {
   if (!value || ![1, 2].includes(value.version) || !Array.isArray(value.scopes)) {
     throw new Error("Unsupported or corrupt Threadline session");
   }
+  const legacySessionId = String(value.id ?? "").replace(/^conversation_/u, "");
+  value.sessionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.sessionId)
+    ? value.sessionId.toLowerCase()
+    : /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(legacySessionId)
+      ? legacySessionId.toLowerCase()
+      : randomUUID();
   for (const scope of value.scopes) {
     scope.turns ??= [];
     scope.collapsed ??= false;
+    scope.providerState ??= {};
+    scope.tokenUsage ??= null;
     for (const turn of scope.turns) {
       turn.assistant ??= { id: id("message"), text: "", status: "complete" };
       turn.assistant.itemIds ??= [];
@@ -236,6 +248,8 @@ export function addBranch(conversation, parentScopeId, anchor, providerThreadId 
     id: id("scope"),
     parentId: parentScopeId,
     providerThreadId,
+    providerState: {},
+    tokenUsage: null,
     anchor,
     collapsed: false,
     turns: []
@@ -321,37 +335,116 @@ export function scopeDepth(conversation, scopeId) {
 }
 
 export function createDemoConversation() {
-  const conversation = createConversation({ provider: "demo", title: "Threadline demo" });
+  const conversation = createConversation({ provider: "demo", title: "Threadline interactive showcase" });
   const root = rootScope(conversation);
   root.providerThreadId = "demo-root";
+  root.providerState = {
+    model: "demo-balanced",
+    effort: "medium",
+    collaborationMode: { mode: "default" },
+    personality: "pragmatic",
+    permissions: ":workspace",
+    approvalPolicy: "on-request",
+    cwd: conversation.cwd,
+  };
+  root.tokenUsage = {
+    total: { totalTokens: 12_480 },
+    last: { totalTokens: 2_146 },
+    modelContextWindow: 200_000,
+  };
   const first = addTurn(conversation, root.id, "为什么很多 LLM terminal 对话不方便深入追问？");
   first.providerTurnId = "demo-turn-1";
-  first.assistant.text = [
-    "线性 transcript 很适合连续输入，却不适合局部探索。看到某个结论时，用户往往已经产生新的问题。",
-    "",
-    "更自然的模型是把追问锚定到原回答中的一句话，并让它形成一个可以折叠的局部 thread。主对话继续保持线性，deep dive 默认不污染主线。",
-    "",
-    "终端 resize 时，锚点必须跟随原文而不是屏幕坐标。"
-  ].join("\n");
-  const demoAnswer = first.assistant.text;
-  first.assistant.status = "complete";
-  upsertAssistantMessage(conversation, root.id, first.id, "demo-commentary", { text: "先检查现有 terminal transcript 的限制。", phase: "commentary" });
-  const demoTool = upsertActivity(conversation, root.id, first.id, {
-    id: "demo-tool", type: "commandExecution", command: "inspect transcript layout", status: "completed", exitCode: 0, durationMs: 84, aggregatedOutput: "5 answer segments\n1 anchored thread\n0 screen-coordinate anchors"
+  upsertAssistantMessage(conversation, root.id, first.id, "demo-commentary", {
+    text: "先沿着真实事件顺序检查 transcript、上下文和渲染边界。",
+    phase: "commentary",
   });
-  demoTool.expanded = false;
-  upsertAssistantMessage(conversation, root.id, first.id, "demo-answer", { text: demoAnswer, phase: "final_answer" });
-  first.assistant.timeline = [
-    { kind: "message", id: "demo-commentary" },
-    { kind: "activity", id: "demo-tool" },
-    { kind: "message", id: "demo-answer" },
-  ];
+  upsertAssistantMessage(conversation, root.id, first.id, "demo-answer", {
+    phase: "final_answer",
+    text: [
+      "Threadline 把追问锚定到回答原文，而不是终端的行列坐标。窗口 resize 后可以重新排版，问题仍然指向同一段内容。",
+      "",
+      "每个 deep-dive thread 都是真实的 provider fork：它继承创建那一刻之前的上下文，之后与父对话独立发展。thread 还可以继续嵌套。",
+      "",
+      "工具调用按事件顺序保存。连续调用默认压成一条摘要，展开后仍能逐项查看完整 payload；很长的输出会分页，而不是从 session 中截断。",
+    ].join("\n"),
+  });
+  first.assistant.status = "complete";
 
-  const segment = segmentsForTurn(first)[2];
-  const child = addBranch(conversation, root.id, makeAnchor(first, segment), "demo-child");
-  const followup = addTurn(conversation, child.id, "为什么不能保存 terminal 的行列坐标？");
-  followup.providerTurnId = "demo-turn-2";
-  followup.assistant.text = "因为窗口宽度改变后会重新换行；CJK、emoji 和 Markdown 渲染也会改变 cell 数。锚点应保存消息 ID、源码区间和文本指纹。";
-  followup.assistant.status = "complete";
+  const sourceSegment = segmentsForTurn(first).find((segment) => segment.text.includes("行列坐标"));
+  const contextSegment = segmentsForTurn(first).find((segment) => segment.text.includes("provider fork"));
+  if (!sourceSegment || !contextSegment) throw new Error("Demo anchors could not be built");
+
+  const sourceThread = addBranch(conversation, root.id, makeAnchor(first, sourceSegment), "demo-source-thread");
+  sourceThread.providerState = { ...root.providerState };
+  const sourceFollowup = addTurn(conversation, sourceThread.id, "为什么不能保存 terminal 的行列坐标？");
+  sourceFollowup.providerTurnId = "demo-turn-2";
+  upsertAssistantMessage(conversation, sourceThread.id, sourceFollowup.id, "source-commentary", {
+    text: "用两个窗口宽度复算同一段文本。", phase: "commentary",
+  });
+  upsertActivity(conversation, sourceThread.id, sourceFollowup.id, {
+    id: "source-width-48", type: "commandExecution", command: "render --width 48", status: "completed", aggregatedOutput: "8 rows; source range 62..113",
+  });
+  upsertActivity(conversation, sourceThread.id, sourceFollowup.id, {
+    id: "source-width-100", type: "commandExecution", command: "render --width 100", status: "completed", aggregatedOutput: "4 rows; source range 62..113",
+  });
+  upsertAssistantMessage(conversation, sourceThread.id, sourceFollowup.id, "source-answer", {
+    text: "因为窗口宽度、CJK、emoji 和 Markdown 都会改变 cell 与换行。Threadline 保存消息 ID、源码区间和文本指纹；屏幕行只是当前渲染结果。",
+    phase: "final_answer",
+  });
+  sourceFollowup.assistant.status = "complete";
+
+  const contextThread = addBranch(conversation, root.id, makeAnchor(first, contextSegment), "demo-context-thread");
+  contextThread.providerState = { ...root.providerState, effort: "high" };
+  const contextFollowup = addTurn(conversation, contextThread.id, "父子 thread 的上下文究竟如何隔离？");
+  contextFollowup.providerTurnId = "demo-turn-3";
+  upsertAssistantMessage(conversation, contextThread.id, contextFollowup.id, "context-answer", {
+    text: "子 thread 复制父 provider thread 到被选中回答所在的 turn，然后接收精确摘录和新问题。此后父子历史分开；父线的新消息不会悄悄进入已存在的子线。",
+    phase: "final_answer",
+  });
+  contextFollowup.assistant.status = "complete";
+
+  const nestedSegment = segmentsForTurn(contextFollowup).find((segment) => segment.text.includes("父子历史分开"));
+  if (!nestedSegment) throw new Error("Nested demo anchor could not be built");
+  const nestedThread = addBranch(conversation, contextThread.id, makeAnchor(contextFollowup, nestedSegment), "demo-nested-thread");
+  nestedThread.providerState = { ...contextThread.providerState };
+  const nestedFollowup = addTurn(conversation, nestedThread.id, "那嵌套 thread 从哪里 fork？");
+  nestedFollowup.providerTurnId = "demo-turn-4";
+  upsertAssistantMessage(conversation, nestedThread.id, nestedFollowup.id, "nested-answer", {
+    text: "从直接父 thread 的选中 turn fork，不会绕回 root。面包屑、颜色和 provider ID 都保留这条父子关系。",
+    phase: "final_answer",
+  });
+  nestedFollowup.assistant.status = "complete";
+
+  const tools = addTurn(conversation, root.id, "连续几十条 tool calls 怎样保持可读，又不丢失细节？");
+  tools.providerTurnId = "demo-turn-5";
+  upsertAssistantMessage(conversation, root.id, tools.id, "tools-commentary", {
+    text: "模拟一次搜索、MCP 调用、测试命令和文件修改。",
+    phase: "commentary",
+  });
+  upsertActivity(conversation, root.id, tools.id, {
+    id: "demo-search", type: "webSearch", query: "terminal conversation branching UX", status: "completed",
+    result: { matches: 18, selected: 4 },
+  });
+  upsertActivity(conversation, root.id, tools.id, {
+    id: "demo-mcp", type: "mcpToolCall", server: "github", tool: "search_code", status: "completed",
+    arguments: { query: "thread/fork source offsets", repository: "threadline" },
+    result: { files: ["src/model.mjs", "src/render.mjs", "src/tui.mjs"] },
+  });
+  upsertActivity(conversation, root.id, tools.id, {
+    id: "demo-command", type: "commandExecution", command: "npm test -- --showcase", cwd: conversation.cwd, status: "completed", exitCode: 0, durationMs: 1_842,
+    aggregatedOutput: Array.from({ length: 150 }, (_, index) => `${String(index + 1).padStart(3, "0")}  PASS  source anchor ${String(index + 1).padStart(3, "0")} remains stable after resize and redraw`).join("\n"),
+  });
+  upsertActivity(conversation, root.id, tools.id, {
+    id: "demo-change", type: "fileChange", status: "completed",
+    changes: [
+      { type: "update", path: "src/render.mjs" },
+      { type: "update", path: "src/tui.mjs" },
+    ],
+  });
+  upsertAssistantMessage(conversation, root.id, tools.id, "tools-answer", {
+    text: "这 4 条 activity 默认只占一行。现在按 Up 两次选中它，Enter 展开整组；再选中单条 activity 并按 Enter 查看 payload，长测试输出可用 [ 和 ] 翻页。按 T 查看彩色 thread 总览；回到输入框键入 /model 体验选择器。",
+    phase: "final_answer",
+  });
+  tools.assistant.status = "complete";
   return conversation;
 }

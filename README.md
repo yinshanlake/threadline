@@ -16,14 +16,14 @@ Install the current `main` branch from GitHub's source archive. This also instal
 npm install --global https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz
 codex login
 threadline --probe
-threadline --demo --new
+threadline demo
 threadline --new
 ```
 
 To try it without a global install:
 
 ```shell
-npx --yes --package=https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz threadline --demo --new
+npx --yes --package=https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz threadline demo
 ```
 
 To work from a clone:
@@ -34,25 +34,60 @@ cd threadline
 npm install
 npm test
 npm link
-threadline --demo --new
+threadline demo
 ```
 
-`--probe` verifies the Codex protocol without starting a conversation. `--demo` exercises selection, expansion, and collapse without using the model. Omit `--new` to resume the saved Threadline session for the current working directory.
+`--probe` verifies the Codex protocol without starting a conversation. `threadline demo` always opens a fresh offline feature showcase; `--demo` keeps the resumable demo-session behavior. Neither connects to Codex.
+Use `--yolo` for the same full-access/no-approval posture as Codex (`danger-full-access` plus `approval_policy=never`). This is intentionally opt-in.
+
+## Interactive demo
+
+Run `threadline demo` in Windows Terminal or another full-screen terminal. The showcase includes two root threads, one nested thread, stable thread colors, a collapsed tool-call group, a paged command payload, the slash-command menu, and the model/reasoning picker.
+Use `threadline demo --no-alt-screen` if the walkthrough should remain in terminal scrollback, or `threadline demo --snapshot` for a non-interactive text preview.
+
+A quick walkthrough:
+
+1. Press `Up` twice. The `4 activities` summary is selected.
+2. Press `Enter` to expand the group, then move to `npm test -- --showcase` and press `Enter` again. Use `[` and `]` to page through its output.
+3. Press `T` to see the colored thread tree. `Enter` opens a focused thread; `B` returns to its parent.
+4. Press `Esc`, type `/model`, and press `Enter`. Choose a model and reasoning effort with the arrow keys and `Enter`.
+5. Type `/status`, `/mcp`, or `/skills` to see offline command panels.
+6. Select any completed answer passage and start typing to create another simulated deep-dive fork.
+7. Press `Ctrl+C` to save and print a GUID-based resume command.
+
+Every session is also archived under a GUID. On exit Threadline prints a command such as:
+
+```shell
+Session saved: 91e041bc-6238-47cd-9f37-4146e4432dc2
+To continue, run: threadline resume 91e041bc-6238-47cd-9f37-4146e4432dc2
+```
+
+The existing per-directory automatic resume remains available. `threadline resume GUID` (or `--resume GUID`) restores a specific archived session from any directory.
 
 ## Keys
 
 - Type and press `Enter` to send on the current scope.
-- With an empty composer, `Up` or `Tab` enters Inspect mode at the latest answer.
+- While Codex is working, the footer shows elapsed time; press `Esc` to stop a stalled or unwanted answer without leaving Threadline.
+- With an empty composer and completed content available, `Up` or `Tab` enters Inspect mode at the latest answer.
 - `Up`/`Down` chooses an answer passage, tool activity, or thread.
 - Start typing on a selected passage (or press `Enter`) to ask a focused follow-up and create a real Codex fork.
 - To keep one conversation navigable, Threadline allows up to 32 deep-dive threads, 4 nested levels, and 3 threads on the same excerpt. An identical follow-up reuses the existing idea instead of creating another provider fork.
-- `Enter` on a tool activity expands the complete payload Threadline received from the CLI.
+- Consecutive tool activities are collapsed into one status summary by default. `Enter`, `Space`, or `Right` expands the group so each activity can be inspected; `Left` collapses it again.
+- `Enter` on an individual tool activity expands the complete payload Threadline received from the CLI.
 - `[` / `]` pages through very large expanded tool payloads; the session still keeps the complete received data.
 - `Enter` on a thread opens its focused view; `B` returns to its parent.
-- `Left`/`Right` collapses or expands a thread or tool activity; `Space` toggles it.
+- `Left`/`Right` collapses or expands a thread, tool group, or individual tool activity; `Space` toggles it.
 - `V` switches between passage and sentence precision while inspecting.
 - `T` shows all deep-dive threads.
 - `Ctrl+C` saves and exits. Command and file approvals require an explicit `y`; `n` or `Esc` declines.
+
+Each deep-dive thread has a stable accent color derived from its Threadline scope ID. The accent follows that thread through inline, focused, overview, resize, and resumed views; `--no-color` remains plain text. Completed answer blocks inside an inline thread are selectable too, so a thread can branch again from its own answer.
+
+## Thread context
+
+Threadline deep dives are real Codex forks, not prompts reconstructed from the visible terminal. When a passage is selected, Threadline calls `thread/fork` with the parent Codex thread ID and the provider turn ID that produced that answer. Codex therefore copies the complete provider context up to that turn. Threadline then sends a focused prompt containing the exact selected excerpt and the follow-up question.
+
+After the fork, contexts are isolated: later main-thread messages do not enter an existing child, and child answers do not alter the parent. A nested deep dive forks from its immediate child thread and selected child turn. Threadline stores the tree, anchors, provider thread/turn IDs, transcript, and UI state; Codex owns the actual model-context history and compaction for each provider thread.
 
 ## Portable mode
 
@@ -63,6 +98,19 @@ Threadline automatically uses line mode for `TERM=dumb` and non-TTY input/output
 ```
 
 Run `/help` for `/segments`, `/dive N question`, `/activities`, `/activity N`, `/threads`, `/open N`, `/back`, and `/quit`.
+
+## Codex slash commands
+
+Threadline handles compatible Codex commands locally instead of sending slash text to the model.
+Type `/` in the full-screen composer to open the command menu; use Up/Down, Tab, and Enter to
+select a command. Core commands include `/status`, `/model [MODEL [EFFORT]]`,
+`/permissions [PROFILE]`, `/personality`, `/plan [PROMPT]`, `/default [PROMPT]`, `/compact`,
+`/review [INSTRUCTIONS]`, `/rename NAME`, `/mcp [verbose]`, `/skills [FILTER]`, `/usage`,
+`/init`, `/diff`, `/new`, and `/copy`.
+
+Some commands such as `/theme`, `/keymap`, `/vim`, and `/app` only control the original Codex
+TUI and have no portable app-server equivalent. Threadline reports these explicitly and never
+silently turns them into model prompts. Run `/help` for the current Threadline command list.
 
 ## Storage and boundaries
 
@@ -82,6 +130,7 @@ By default, one session allows up to **32 deep-dive threads**, **4 nesting level
 
 The Codex app-server protocol is currently experimental. Its JSON-RPC details are isolated in `src/providers/codex.mjs`, and `--probe` provides a quick compatibility check after Codex upgrades.
 Threadline uses its installed `@openai/codex` dependency. Nonstandard installations can set `THREADLINE_CODEX_PATH` to an absolute `codex` executable or `codex.js` path.
+The legacy `ado` MCP entry is disabled only inside Threadline's Codex process because it duplicates the newer `azure-devops` entry and can block the first answer for more than a minute. This does not edit the user's global Codex configuration; `azure-devops`, Bluebird, WorkIQ, Playwright, and Substrate MCP servers remain available.
 
 ## Development
 

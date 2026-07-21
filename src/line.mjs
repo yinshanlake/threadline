@@ -87,7 +87,10 @@ export class LineApp {
     if (!input) return true;
     if (["/quit", "/exit"].includes(input)) return false;
     if (input === "/help") {
-      this.print("/show  /segments  /dive N question  /activities  /activity N  /threads  /open N  /back  /quit"); return true;
+      this.print("Threadline line commands: /show  /segments  /dive N question  /activities  /activity N  /threads  /open N  /back  /quit");
+      const result = await this.controller.executeSlashCommand("/help");
+      if (result?.output) this.print(result.output);
+      return true;
     }
     if (input === "/show") { this.print(renderSnapshot(this.controller.conversation)); return true; }
     if (input === "/segments") {
@@ -148,7 +151,13 @@ export class LineApp {
       const turn = child?.turns.at(-1); if (turn) await this.waitForTurn(turn);
       this.print(renderSnapshot(this.controller.conversation)); return true;
     }
-    if (input.startsWith("/")) { this.print("Unknown command. Run /help."); return true; }
+    if (input.startsWith("/")) {
+      const result = await this.controller.executeSlashCommand(input);
+      if (!result?.handled) { this.print(`Unknown command: ${input.split(/\s/u, 1)[0]}. Run /help.`); return true; }
+      if (result.output) this.print(`${result.title ? `${result.title}\n` : ""}${result.output}`);
+      if (result.turn) await this.waitForTurn(result.turn);
+      return !result.quit;
+    }
     const turn = await this.controller.send(this.controller.conversation.activeScopeId, input);
     if (turn) await this.waitForTurn(turn);
     const scope = findScope(this.controller.conversation, this.controller.conversation.activeScopeId);
