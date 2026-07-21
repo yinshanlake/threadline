@@ -1,8 +1,8 @@
 import { assistantMessageParts, childScopes, findScope, scopeDepth, segmentsForTurn } from "./model.mjs";
-import { contentBlocks, displayWidth, sanitizeTerminalText, truncate, wrapAnnotatedText, wrapDisplayText } from "./text.mjs";
+import { contentBlocks, displayWidth, sanitizeTerminalText, terminalPlainText, truncate, wrapAnnotatedText, wrapDisplayText } from "./text.mjs";
 
 export const ansi = {
-  reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m", italic: "\x1b[3m", underline: "\x1b[4m",
+  reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m", italic: "\x1b[3m", underline: "\x1b[4m", strike: "\x1b[9m",
   cyan: "\x1b[36m", yellow: "\x1b[33m", red: "\x1b[31m", inverse: "\x1b[7m",
   threadColors: [81, 141, 114, 215, 212, 75, 44, 180].map((color) => `\x1b[38;5;${color}m`),
 };
@@ -96,11 +96,11 @@ function renderMessage(lines, selectables, conversation, scope, turn, message, w
     }
     const prefix = block.type === "code" ? codeIndent : baseIndent;
     const usable = Math.max(1, width - displayWidth(prefix));
-    const annotated = wrapAnnotatedText(block.text, usable, { sourceStart: globalStart, ranges });
+    const annotated = wrapAnnotatedText(block.text, usable, { sourceStart: globalStart, ranges, type: block.type });
     annotated.forEach((line) => {
       const parts = [{ text: prefix, tone: block.type === "code" ? "codeBorder" : "dim", accent }];
       const bodyTone = turn.assistant.status === "failed" ? "error" : message.phase === "commentary" ? "commentary" : block.type;
-      for (const part of line.parts) parts.push({ text: part.text, tone: bodyTone, selectableIndex: part.selectableIndex });
+      for (const part of line.parts) parts.push({ text: part.text, tone: turn.assistant.status === "failed" ? "error" : part.tone || bodyTone, selectableIndex: part.selectableIndex });
       addLine(lines, parts, { selectableIndices: [...new Set(line.parts.map((part) => part.selectableIndex).filter((value) => value !== undefined))] });
     });
 
@@ -340,7 +340,7 @@ export function breadcrumb(conversation, scopeId, width) {
   const parts = [];
   let scope = findScope(conversation, scopeId);
   while (scope) {
-    parts.push(scope.parentId ? truncate(sanitizeTerminalText(scope.anchor?.exactQuote || "thread"), 22) : "main");
+    parts.push(scope.parentId ? truncate(terminalPlainText(scope.anchor?.exactQuote || "thread").replace(/\s+/gu, " "), 22) : "main");
     scope = scope.parentId ? findScope(conversation, scope.parentId) : null;
   }
   return truncate(parts.reverse().join("  /  "), width);
@@ -358,7 +358,8 @@ export function overviewView(conversation, width) {
     const selectableIndex = selectables.length;
     selectables.push({ kind: "branch", scopeId: scope.id });
     const depth = scopeDepth(conversation, scope.id);
-    addWrapped(lines, `${index + 1}  ${"  ".repeat(Math.max(0, depth - 1))}${scope.anchor?.exactQuote || "thread"}`, width, { prefix: "    ", continuation: "       ", prefixAccent: accent, tone: "thread", accent, selectableIndex });
+    const label = terminalPlainText(scope.anchor?.exactQuote || "thread").replace(/\s+/gu, " " );
+    addWrapped(lines, `${index + 1}  ${"  ".repeat(Math.max(0, depth - 1))}${label}`, width, { prefix: "    ", continuation: "       ", prefixAccent: accent, tone: "thread", accent, selectableIndex });
     addLine(lines, [{ text: `       ${scope.turns.length} turns`, tone: "hint", accent }]);
   });
   return { lines, selectables };
@@ -382,10 +383,15 @@ export function applyTone(text, tone, selected = false, colors = true, accent = 
     if (accentColor) prefix += accentColor;
     if (tone === "user") prefix += ansi.bold;
     if (tone === "heading") prefix += ansi.bold;
+    if (tone === "strong") prefix += ansi.bold;
+    if (tone === "emphasis") prefix += ansi.italic;
+    if (tone === "strike") prefix += ansi.strike + ansi.dim;
     if (tone === "quote") prefix += ansi.italic + ansi.dim;
     if (!accentColor && ["thread", "activity", "section"].includes(tone)) prefix += ansi.cyan;
     if (["dim", "hint", "empty", "commentary", "rail"].includes(tone)) prefix += ansi.dim;
-    if (["code", "toolOutput"].includes(tone)) prefix += ansi.dim;
+    if (["code", "inlineCode", "toolOutput"].includes(tone)) prefix += ansi.dim;
+    if (tone === "link") prefix += ansi.underline;
+    if (tone === "math") prefix += ansi.cyan;
     if (tone === "codeBorder") prefix += (accentColor ? "" : ansi.cyan) + ansi.dim;
     if (tone === "error") prefix += ansi.red;
     if (tone === "warning") prefix += ansi.yellow;

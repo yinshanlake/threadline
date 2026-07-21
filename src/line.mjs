@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { findScope, segmentsForTurn } from "./model.mjs";
 import { overviewView, renderSnapshot } from "./render.mjs";
-import { sanitizeTerminalText } from "./text.mjs";
+import { sanitizeTerminalText, terminalDocumentText, terminalPlainText } from "./text.mjs";
 
 function selectableSegments(conversation, scopeId) {
   const scope = findScope(conversation, scopeId);
@@ -40,7 +40,7 @@ export class LineApp {
       }
       if (this.controller.pendingApproval) {
         if (!this.input.isTTY) { this.controller.answerApproval(false); continue; }
-        const answer = await this.rl.question("Codex requests approval [y/N] > ");
+        const answer = await this.rl.question(`${this.controller.providerLabel()} requests approval [y/N] > `);
         this.controller.answerApproval(/^y(es)?$/i.test(answer.trim()));
         continue;
       }
@@ -68,7 +68,7 @@ export class LineApp {
           continue;
         }
         if (this.controller.pendingApproval) {
-          const answer = await this.rl.question("Codex requests approval [y/N] > ");
+          const answer = await this.rl.question(`${this.controller.providerLabel()} requests approval [y/N] > `);
           this.controller.answerApproval(/^y(es)?$/i.test(answer.trim()));
           continue;
         }
@@ -95,7 +95,7 @@ export class LineApp {
     if (input === "/show") { this.print(renderSnapshot(this.controller.conversation)); return true; }
     if (input === "/segments") {
       const items = selectableSegments(this.controller.conversation, this.controller.conversation.activeScopeId);
-      items.forEach((item, index) => this.print(`${index + 1}. ${item.segment.text}`));
+      items.forEach((item, index) => this.print(`${index + 1}. ${terminalPlainText(item.segment.text, item.segment.blockType)}`));
       if (!items.length) this.print("No completed answer segments.");
       return true;
     }
@@ -161,7 +161,7 @@ export class LineApp {
     const turn = await this.controller.send(this.controller.conversation.activeScopeId, input);
     if (turn) await this.waitForTurn(turn);
     const scope = findScope(this.controller.conversation, this.controller.conversation.activeScopeId);
-    this.print(scope?.turns.at(-1)?.assistant.text ?? "");
+    this.print(terminalDocumentText(scope?.turns.at(-1)?.assistant.text ?? ""));
     return true;
   }
 }

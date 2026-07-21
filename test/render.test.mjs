@@ -115,3 +115,27 @@ test("empty, working, and failed states share the transcript hierarchy", () => {
   const failure = view.lines.find((line) => line.text.includes("Provider unavailable"));
   assert.ok(failure.parts.some((part) => part.tone === "error"));
 });
+
+test("conversation rendering hides Markdown delimiters and renders common math", () => {
+  const conversation = createConversation();
+  const scope = rootScope(conversation);
+  const turn = addTurn(conversation, scope.id, "Explain the mapping");
+  turn.assistant.status = "complete";
+  turn.assistant.text = "**Logical mapping**\n\n$$\n\\text{aB3x9K} \\rightarrow \\text{https://example.com/very/long/url}\n$$";
+  const view = buildConversationView(conversation, { width: 80 });
+  const plain = view.lines.map((line) => line.text).join("\n");
+  assert.match(plain, /Logical mapping/);
+  assert.match(plain, /aB3x9K → https:\/\/example\.com\/very\/long\/url/);
+  assert.doesNotMatch(plain, /\*\*|\$\$|\\text|\\rightarrow/);
+  const math = view.selectables.find((item) => item.kind === "segment" && item.segment.blockType === "math");
+  assert.equal(turn.assistant.text.slice(math.segment.start, math.segment.end), math.segment.text);
+});
+
+test("thread navigation uses rendered anchor text without changing stored quotes", () => {
+  const conversation = createDemoConversation();
+  const branch = conversation.scopes.find((scope) => scope.parentId);
+  branch.anchor.exactQuote = "**mapping** $x \\rightarrow y$";
+  const view = overviewView(conversation, 80);
+  assert.match(view.lines.map((line) => line.text).join("\n"), /mapping x → y/);
+  assert.equal(branch.anchor.exactQuote, "**mapping** $x \\rightarrow y$");
+});

@@ -5,7 +5,7 @@ import { findScope } from "./model.mjs";
 const execFileAsync = promisify(execFile);
 
 export const SLASH_COMMANDS = Object.freeze([
-  { name: "help", description: "list Threadline and compatible Codex commands" },
+  { name: "help", description: "list Threadline and provider commands" },
   { name: "status", description: "show session configuration and token usage" },
   { name: "model", usage: "[MODEL [EFFORT]]", description: "list or choose model and reasoning effort" },
   { name: "permissions", usage: "[PROFILE]", description: "list or choose a Codex permission profile" },
@@ -20,7 +20,7 @@ export const SLASH_COMMANDS = Object.freeze([
   { name: "usage", description: "show account usage and rate limits when available" },
   { name: "init", description: "ask Codex to create an AGENTS.md file" },
   { name: "diff", description: "show git diff, including untracked files" },
-  { name: "new", description: "start a new root Codex thread in this Threadline session" },
+  { name: "new", description: "start a new root provider session in Threadline" },
   { name: "copy", description: "show the last response in a copy-friendly panel" },
   { name: "threads", description: "show Threadline deep-dive threads" },
   { name: "back", description: "return to the parent Threadline scope" },
@@ -34,6 +34,10 @@ const CODEX_TUI_ONLY = new Set([
   "memories", "mention", "multi-agents", "pet", "pets", "plugins", "ps", "raw",
   "resume", "sandbox-add-read-dir", "setup-default-sandbox", "side", "statusline", "stop",
   "subagents", "theme", "title", "vim",
+]);
+
+export const THREADLINE_SLASH_NAMES = new Set([
+  "help", "status", "diff", "new", "copy", "threads", "back", "quit", "exit",
 ]);
 
 function parse(input) {
@@ -55,14 +59,39 @@ function normalizePermission(value) {
   return ({ "read-only": ":read-only", readonly: ":read-only", workspace: ":workspace", "workspace-write": ":workspace", danger: ":danger-full-access", full: ":danger-full-access", "danger-full-access": ":danger-full-access" })[key] ?? value;
 }
 
+function claudeNativeCommand(controller, name) {
+  if (controller.conversation.provider !== "claude") return false;
+  if (THREADLINE_SLASH_NAMES.has(name)) return false;
+  const scope = findScope(controller.conversation, controller.conversation.activeScopeId);
+  const commands = scope?.providerState?.slashCommands;
+  if (Array.isArray(commands)) return commands.includes(name);
+  return controller.provider.slashCommands?.has(name) ?? false;
+}
+
+async function discoverClaudeCommands(controller) {
+  if (controller.conversation.provider !== "claude" || typeof controller.provider.discoverSlashCommands !== "function") return;
+  const scope = await activeScope(controller);
+  if (Array.isArray(scope.providerState?.slashCommands)) return;
+  const commands = await controller.provider.discoverSlashCommands();
+  scope.providerState = { ...scope.providerState, slashCommands: [...commands] };
+  controller.persist();
+}
+
 function providerUnavailable(controller, name) {
-  if (controller.conversation.provider !== "demo") return null;
+  const provider = controller.conversation.provider;
+  if (provider === "claude") {
+    if (THREADLINE_SLASH_NAMES.has(name) || claudeNativeCommand(controller, name)) return null;
+    const known = SLASH_COMMANDS.some((command) => command.name === name) || CODEX_TUI_ONLY.has(name);
+    if (!known) return null;
+    return { handled: true, title: `/${name}`, output: `/${name} is not exposed by the Claude Code stream-json adapter.`, message: "Command unavailable with Claude Code" };
+  }
+  if (provider !== "demo") return null;
   if (["status", "copy", "model", "permissions", "personality", "plan", "default", "mcp", "skills", "usage", "rename"].includes(name)) return null;
   return { handled: true, title: `/${name}`, output: "This Codex command is unavailable in demo mode.", message: "Codex command unavailable in demo mode" };
 }
 
-function commandHelp() {
-  return SLASH_COMMANDS.map((command) => {
+function commandHelp(controller) {
+  return controller.slashCommands().map((command) => {
     const invocation = `/${command.name}${command.usage ? ` ${command.usage}` : ""}`;
     return `${invocation.padEnd(34)} ${command.description}`;
   }).join("\n");
@@ -81,7 +110,7 @@ function statusOutput(controller, scope) {
   const percent = typeof used === "number" && typeof window === "number" && window > 0 ? `${((used / window) * 100).toFixed(1)}%` : "unknown";
   return [
     `Threadline scope: ${scope.id}`,
-    `Codex thread: ${scope.providerThreadId ?? "not started"}`,
+    `${controller.providerLabel()} session: ${scope.providerThreadId ?? "not started"}`,
     `Model: ${state.model ?? "unknown"}${state.effort ? ` (${state.effort})` : ""}`,
     `Mode: ${state.collaborationMode?.mode ?? "default"}`,
     `Personality: ${state.personality ?? "default"}`,
@@ -182,12 +211,22 @@ export async function executeSlashCommand(controller, input) {
   if (!parsed) return { handled: false };
   const { name, args } = parsed;
   if (["quit", "exit"].includes(name)) return { handled: true, quit: true };
-  if (name === "help") return { handled: true, title: "Slash commands", output: commandHelp(), message: "Slash command help" };
+  if (name === "help") {
+    await discoverClaudeCommands(controller);
+    return { handled: true, title: "Slash commands", output: commandHelp(controller), message: "Slash command help" };
+  }
   if (name === "back") { controller.goToParent(); return { handled: true, message: "Opened parent scope" }; }
   if (name === "threads") return { handled: true, action: "threads", message: "Thread overview" };
-  if (CODEX_TUI_ONLY.has(name)) return { handled: true, title: `/${name}`, output: `/${name} is implemented by the original Codex TUI and is not exposed as a portable app-server command. Threadline did not send it to the model.`, message: `/${name} is Codex-TUI-only` };
+  await discoverClaudeCommands(controller);
   const unavailable = providerUnavailable(controller, name);
-  if (unavailable) return unavailable;
+  if (unavailable && !claudeNativeCommand(controller, name)) return unavailable;
+  if (claudeNativeCommand(controller, name)) {
+    const scope = await activeScope(controller);
+    requireIdle(scope, name);
+    const turn = await controller.send(scope.id, input);
+    return { handled: true, turn, message: `Running Claude Code /${name}` };
+  }
+  if (CODEX_TUI_ONLY.has(name)) return { handled: true, title: `/${name}`, output: `/${name} is implemented by the original Codex TUI and is not exposed as a portable app-server command. Threadline did not send it to the model.`, message: `/${name} is Codex-TUI-only` };
 
   if (name === "new") {
     const scope = findScope(controller.conversation, controller.conversation.rootScopeId);
@@ -197,7 +236,7 @@ export async function executeSlashCommand(controller, input) {
     controller.conversation.scopes = [scope];
     controller.loadedThreads.clear(); controller.scopeLoads.clear(); controller.conversation.activeScopeId = scope.id; controller.persist();
     await controller.ensureScope(scope.id);
-    return { handled: true, title: "New session", output: `Started Codex thread ${scope.providerThreadId}.`, message: "New Codex thread started" };
+    return { handled: true, title: "New session", output: `Started ${controller.providerLabel()} session ${scope.providerThreadId}.`, message: `New ${controller.providerLabel()} session started` };
   }
 
   const scope = await activeScope(controller, { ensure: !["copy", "status", "diff"].includes(name) });

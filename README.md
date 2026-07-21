@@ -2,7 +2,7 @@
 
 Threadline is a terminal UI for branching from an exact passage in an LLM CLI answer without losing the conversation that produced it. A deep dive stays visible beside its source, can contain its own tool calls, and can branch again.
 
-Codex is the first supported provider. Threadline uses real Codex provider threads for model context and a local scope tree for navigation, persistence, and rendering.
+Threadline supports Codex and Claude Code. It uses provider sessions for model context and a local scope tree for navigation, persistence, and rendering.
 
 ## What it looks like
 
@@ -28,15 +28,17 @@ The screenshots come from `threadline demo`, an offline showcase with Chinese sa
 | --- | --- | --- | --- |
 | OpenAI Codex CLI | Supported | Codex app-server over stdio | Start, resume, fork, stream, interrupt, approvals, tool events, model settings, slash commands, and provider context compaction. |
 | Offline demo | Supported | Built-in deterministic provider | Exercises the TUI, nested threads, tools, command panels, and model picker without a network connection. |
-| Anthropic Claude Code | Not currently supported | No Claude provider exists yet | Claude Code is not installed or invoked by Threadline. Support would require a provider adapter with equivalent thread fork/resume and structured event semantics. |
+| Anthropic Claude Code | Supported | Claude Code `stream-json` CLI | Start, resume, fork from the latest completed answer in a scope, stream, interrupt, and structured tool events. |
 
-The UI and controller are provider-oriented, but the only production adapter in this repository today is `src/providers/codex.mjs`. “LLM CLI” describes the intended category, not a claim that every CLI is already supported.
+Provider sessions are stored separately, so switching between Codex and Claude Code never mixes histories. Claude commands run with the semantics exposed by Claude Code's non-interactive `stream-json` mode; commands that require Claude's own interactive UI report that limitation explicitly.
 
 ## Requirements
 
 - Node.js 18 or newer
-- a working Codex login (`codex login`) for live conversations
+- a working Codex login (`codex login`) or Claude Code login for live conversations
 - a terminal; Windows Terminal is recommended on Windows
+
+Claude Code must be installed separately; Threadline does not bundle it. Authenticate with the normal `claude` login flow before running `threadline --claude --probe`.
 
 ## Install
 
@@ -46,8 +48,10 @@ Install the current `main` branch. The package includes a compatible `@openai/co
 npm install --global https://github.com/yinshanlake/threadline/archive/refs/heads/main.tar.gz
 codex login
 threadline --probe
+threadline --claude --probe
 threadline demo
 threadline --new
+threadline --claude --new
 ```
 
 Try the demo without a global install:
@@ -67,17 +71,17 @@ npm link
 threadline demo
 ```
 
-`threadline --probe` verifies the Codex app-server handshake without starting a conversation. `threadline demo` always starts a fresh offline showcase; `--demo` uses the resumable demo session.
+`threadline --probe` verifies the selected provider without starting a conversation. Add `--claude` (or `--provider claude`) to select Claude Code. `threadline demo` always starts a fresh offline showcase; `--demo` uses the resumable demo session.
 
 ## How the UI manages threads
 
 1. With an empty composer, press `Up` or `Tab` to inspect the latest completed answer.
 2. Move between answer passages with `Up`/`Down`; press `V` to switch between block and sentence precision.
 3. Start typing on the selected passage, or press `Enter`, then ask the focused follow-up.
-4. Threadline anchors the new scope to the original assistant message and raw source range, then asks the provider to fork at the turn that produced that answer.
+4. Threadline anchors the new scope to the original assistant message and raw source range, then asks the provider to fork at the turn that produced that answer. Claude Code can fork only the latest completed answer in the current scope because its CLI does not expose historical turn IDs.
 5. The reply is rendered inline. Open it as a focused scope with `Enter`, return with `B`, or press `T` for the complete thread tree.
 
-Anchors persist message IDs, provider turn IDs, raw source offsets, the exact quote, and nearby prefix/suffix text. They never persist screen rows or columns, so CJK width, emoji, terminal resize, or wrapping can change the layout without changing what a thread refers to.
+Anchors persist message IDs, a provider correlation ID, raw source offsets, the exact quote, and nearby prefix/suffix text. Codex supplies the correlation ID; Claude turns use a Threadline-local UUID because Claude's print protocol exposes session IDs but not stable turn IDs. Anchors never persist screen rows or columns, so CJK width, emoji, terminal resize, or wrapping can change the layout without changing what a thread refers to.
 
 Thread controls:
 
@@ -90,7 +94,7 @@ Thread controls:
 | `V` | Toggle block/sentence selection precision. |
 | `T` | Open the complete thread overview. |
 | `B` | Return from a focused thread to its parent. |
-| `Esc` | Return to input, decline a prompt, or interrupt the active Codex turn. |
+| `Esc` | Return to input, decline a prompt, or interrupt the active provider turn. |
 | `Ctrl+C` | Save the session and exit. |
 
 By default a session allows 32 deep-dive threads, 4 nested levels, and 3 threads on the same excerpt. These limits are checked before the provider is forked, preventing orphan provider threads. An identical follow-up on the same excerpt opens the existing thread rather than creating another fork. The header shows `current/max` capacity and adds `!` after 75%.
@@ -106,20 +110,22 @@ Threadline separates UI state from model context:
 | Owner | What it stores or controls |
 | --- | --- |
 | Threadline scope | Parent scope, anchor, local turns, collapse state, accent, navigation, and provider thread/turn IDs. |
-| Codex provider thread | Canonical model conversation history, context window, compaction, and future turns for that branch. |
+| Provider session | Canonical model conversation history and future turns for that branch. |
 
 Creating a deep dive calls Codex `thread/fork` with the current scope's provider thread ID and the selected answer's `lastTurnId`. Codex copies the canonical conversation up to that turn. Threadline then sends a focused first turn containing the exact selected excerpt and the new question.
 
+With Claude Code, Threadline resumes the current scope session with `--resume`, forks it with `--fork-session`, and assigns a fresh `--session-id`. Claude Code's CLI exposes session-level resume but not Codex-style historical turn IDs, so Threadline enables a Claude deep dive only on that scope's latest completed answer. Nested Claude deep dives work the same way from the child scope's latest answer.
+
 ```mermaid
 flowchart LR
-    R["Root Threadline scope<br/>Codex thread R"]
-    A["Child scope A<br/>Codex thread A"]
-    B["Child scope B<br/>Codex thread B"]
-    A1["Nested scope A.1<br/>Codex thread A.1"]
+    R["Root Threadline scope<br/>provider session R"]
+    A["Child scope A<br/>provider session A"]
+    B["Child scope B<br/>provider session B"]
+    A1["Nested scope A.1<br/>provider session A.1"]
 
-    R -->|"fork at selected root turn"| A
-    R -->|"fork at another root turn"| B
-    A -->|"fork at selected child turn"| A1
+    R -->|"fork at a supported root answer"| A
+    R -->|"fork at another supported answer"| B
+    A -->|"fork at a supported child answer"| A1
 ```
 
 After a fork, future histories are isolated: new root messages do not silently enter existing children, and child turns do not alter the root. A nested deep dive forks from its immediate parent provider thread, not from the root. Each scope can therefore evolve independently while the local tree keeps their relationship navigable.
@@ -128,7 +134,7 @@ After a fork, future histories are isolated: new root messages do not silently e
 
 ## Tool activity and approvals
 
-Threadline preserves assistant messages and tool activities in the order received from Codex. It recognizes structured activity for:
+Threadline preserves assistant messages and tool activities in provider event order. It recognizes structured activity for:
 
 - command execution and terminal interaction;
 - file changes and patch updates;
@@ -139,11 +145,13 @@ Threadline preserves assistant messages and tool activities in the order receive
 - image generation;
 - context compaction, review-mode transitions, and waits.
 
-Consecutive activities collapse into one summary row. Expand the group to inspect each call, then expand an individual activity to view its command, working directory, arguments, changes, progress, streamed output, result, exit code, duration, and received character count when available. Large payloads are split into 8,192-character pages navigated with `[` and `]`. Threadline keeps the complete payload it received; it cannot recover content already truncated by Codex or an upstream tool.
+Consecutive activities collapse into one summary row. Expand the group to inspect each call, then expand an individual activity to view its command, working directory, arguments, changes, progress, streamed output, result, exit code, duration, and received character count when available. Large payloads are split into 8,192-character pages navigated with `[` and `]`. Threadline keeps the complete payload it received; it cannot recover content already truncated by a provider or upstream tool.
 
-Command, file-change, and permission requests are presented explicitly. Press `y` to accept and `n` or `Esc` to decline. Structured `requestUserInput` questions are handled separately from approvals, and concurrent requests are queued. Unknown request types are rejected rather than guessed.
+For Codex, command, file-change, and permission requests are presented explicitly. Press `y` to accept and `n` or `Esc` to decline. Structured `requestUserInput` questions are handled separately from approvals, and concurrent requests are queued. Unknown request types are rejected rather than guessed. Claude Code's non-interactive `stream-json` mode does not expose that approval exchange; Threadline uses `dontAsk`, so tools needing approval fail instead of blocking on a hidden prompt.
 
-`--yolo` requests Codex's `danger-full-access` sandbox with `approval_policy=never`. It is deliberately opt-in.
+Claude tool events use the same activity UI: `Bash` maps to command execution, `Edit`/`Write`/`NotebookEdit` to file changes, MCP tools to MCP calls, `WebSearch` to web search, and other `tool_use` blocks to dynamic tool calls. Tool results update the matching activity without being duplicated as assistant text.
+
+`--yolo` requests Codex's `danger-full-access` sandbox with `approval_policy=never`, or Claude Code's `--dangerously-skip-permissions`. It is deliberately opt-in.
 
 ## Full-screen, line, and demo modes
 
@@ -155,7 +163,8 @@ threadline demo --snapshot      # non-interactive text snapshot
 threadline demo --no-alt-screen # preserve terminal scrollback
 threadline --line               # force portable line mode
 threadline --new                # start a fresh live Codex session
-threadline --cwd PATH           # set the workspace passed to Codex
+threadline --claude --new       # start a fresh live Claude Code session
+threadline --cwd PATH           # set the workspace passed to the provider
 threadline --no-color           # disable ANSI color
 ```
 
@@ -163,7 +172,7 @@ Line mode exposes `/segments`, `/dive N question`, `/activities`, `/activity N`,
 
 ## Slash commands
 
-Typing `/` in the full-screen composer opens a filtered local command menu. Threadline dispatches supported commands through its controller or the Codex app-server; slash text is not silently turned into a model prompt.
+Typing `/` in the full-screen composer opens a filtered local command menu. Threadline dispatches supported commands through its controller or provider adapter; slash text is not silently turned into a model prompt.
 
 | Area | Commands |
 | --- | --- |
@@ -174,6 +183,8 @@ Typing `/` in the full-screen composer opens a filtered local command menu. Thre
 | Extensions | `/mcp [verbose]`, `/skills [FILTER]` |
 
 Commands such as `/theme`, `/keymap`, `/vim`, and `/app` control the original Codex TUI and have no portable app-server equivalent. Threadline reports them as Codex-TUI-only and does not forward them to the model.
+
+With Claude Code, Threadline keeps `/help`, `/status`, `/threads`, `/back`, `/copy`, `/new`, `/diff`, `/quit`, and `/exit` as local commands. It also reads the native command list advertised by each Claude session and adds those commands to the menu. Built-ins such as `/model`, `/compact`, `/context`, `/review`, `/mcp`, `/usage`, and `/init`, plus installed skills and custom commands, run through Claude Code's `stream-json` session. A slash command that is neither local nor advertised is reported as unknown instead of becoming ordinary prompt text. Some commands that require Claude's own interactive TUI may still report that they are unavailable in non-interactive mode.
 
 ## Sessions and storage
 
@@ -186,15 +197,21 @@ To continue, run: threadline resume 91e041bc-6238-47cd-9f37-4146e4432dc2
 
 Use `threadline resume GUID` or `threadline --resume GUID` from any directory. `--session FILE` selects an explicit local session file.
 
-Threadline stores anchors, transcripts, branch layout, tool activity, and UI state under `%LOCALAPPDATA%\threadline\sessions` on Windows or the platform state directory on macOS/Linux. Codex stores its provider sessions normally. Local sessions and transcripts are not part of this repository.
+Threadline stores anchors, transcripts, branch layout, tool activity, and UI state under `%LOCALAPPDATA%\threadline\sessions` on Windows or the platform state directory on macOS/Linux. Codex and Claude Code store their provider sessions normally. Local sessions and transcripts are not part of this repository.
 
-Long streams may be coalesced for terminal repaint, but persisted events are not discarded. Model text is sanitized before rendering so it cannot emit terminal control sequences. Malformed app-server JSON is surfaced as a protocol error rather than interpreted as conversation data. Sessions from the earlier `0.1` prototype remain readable; legacy event order is labeled when it cannot be known exactly.
+Long streams may be coalesced for terminal repaint, but persisted events are not discarded. Model text is sanitized before rendering so it cannot emit terminal control sequences. Malformed provider JSON is surfaced as a protocol error rather than interpreted as conversation data. Sessions from the earlier `0.1` prototype remain readable; legacy event order is labeled when it cannot be known exactly.
+
+Threadline renders common Markdown as terminal-native text: headings, emphasis, inline and fenced code, links, quotes, lists, and simple tables. It also gives common inline and display LaTeX a readable Unicode fallback, for example `\rightarrow` becomes `→`, `x_i^2` becomes `xᵢ²`, and `\frac{1}{2}` becomes `(1)/(2)`. This is intentionally not a full TeX layout engine; unsupported commands remain visible instead of being guessed or silently deleted. Fenced code is always kept literal. Rendering never rewrites stored assistant text: every visible character remains mapped to its original source span, so hiding `**` or `$$` and replacing `\rightarrow` with `→` does not change thread anchors.
 
 ## Codex integration notes
 
 The Codex app-server protocol is experimental. Its JSON-RPC details are isolated in `src/providers/codex.mjs`; run `threadline --probe` after Codex upgrades. Threadline prefers its installed `@openai/codex` dependency. Set `THREADLINE_CODEX_PATH` to an absolute `codex` executable or `codex.js` path for a nonstandard installation.
 
 The legacy `ado` MCP entry is disabled only inside Threadline's Codex process because it duplicates the newer `azure-devops` entry and can delay the first answer. This does not modify global Codex configuration; other configured MCP servers remain available.
+
+## Claude Code integration notes
+
+Threadline invokes the local `claude` executable in non-interactive `stream-json` mode. Set `THREADLINE_CLAUDE_PATH` to an absolute Claude Code executable or JavaScript entrypoint for a nonstandard installation. Normal mode uses `--permission-mode dontAsk`, so a tool that needs unavailable permission fails instead of being approved automatically; `--yolo` explicitly opts into Claude Code's `--dangerously-skip-permissions`. Threadline resolves `claude.exe` directly on Windows and does not invoke PowerShell aliases or wrapper functions.
 
 ## Development
 
