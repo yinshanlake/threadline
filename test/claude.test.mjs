@@ -17,7 +17,10 @@ if (args.includes("--version")) { console.log("2.1.207 (Claude Code)"); process.
 await appendFile(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
-if (${JSON.stringify(mode)} === "hang") await new Promise(() => {});
+if (${JSON.stringify(mode)} === "hang") {
+  setInterval(() => {}, 60_000);
+  await new Promise(() => {});
+}
 const session = args.includes("--session-id")
   ? args[args.indexOf("--session-id") + 1]
   : args[args.indexOf("--resume") + 1];
