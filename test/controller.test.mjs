@@ -54,6 +54,154 @@ test("Codex-TUI-only slash commands fail explicitly and are not sent", async () 
   assert.equal(provider.sendCalls, undefined);
 });
 
+test("Claude Code rejects unsupported slash commands without calling the provider", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.request = async () => { provider.requestCalls = (provider.requestCalls ?? 0) + 1; return {}; };
+  const conversation = createConversation({ provider: "claude" });
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/model");
+
+  assert.equal(result.handled, true);
+  assert.match(result.output, /not exposed by the Claude Code stream-json adapter/);
+  assert.equal(provider.requestCalls, undefined);
+  assert.equal(rootScope(conversation).turns.length, 0);
+});
+
+test("Claude Code rejects init instead of sending its expansion as a prompt", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  const conversation = createConversation({ provider: "claude" });
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/init");
+
+  assert.equal(result.handled, true);
+  assert.match(result.output, /not exposed by the Claude Code stream-json adapter/);
+  assert.equal(rootScope(conversation).turns.length, 0);
+});
+
+test("unknown Claude Code slash commands stay unknown instead of becoming prompts", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  const conversation = createConversation({ provider: "claude" });
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/not-a-command");
+
+  assert.equal(result.handled, false);
+  assert.equal(rootScope(conversation).turns.length, 0);
+});
+
+test("Claude Code status uses provider-neutral session labels", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  const conversation = createConversation({ provider: "claude" });
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/status");
+
+  assert.match(result.output, /Claude Code session: provider-root/);
+  assert.doesNotMatch(result.output, /Codex thread/);
+});
+
+test("Claude Code native slash commands are discovered and forwarded locally", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.slashCommands = new Set(["compact", "code-review"]);
+  provider.send = async (threadId, text) => {
+    provider.sendCall = { threadId, text };
+    return { turnId: "provider-turn" };
+  };
+  const conversation = createConversation({ provider: "claude" });
+  const scope = rootScope(conversation);
+  scope.providerState.slashCommands = ["compact", "code-review"];
+  const controller = new Controller({ conversation, provider });
+
+  assert.deepEqual(
+    controller.slashCommands().filter((command) => ["model", "compact", "code-review"].includes(command.name)).map((command) => command.name),
+    ["compact", "code-review"],
+  );
+  const result = await controller.executeSlashCommand("/code-review high");
+
+  assert.equal(result.handled, true);
+  assert.deepEqual(provider.sendCall, { threadId: "provider-root", text: "/code-review high" });
+  assert.equal(scope.turns.at(-1).user.text, "/code-review high");
+});
+
+test("a first-turn Claude native command is discovered before dispatch", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.slashCommands = new Set();
+  provider.discoverSlashCommands = async () => {
+    provider.discoveryCalls = (provider.discoveryCalls ?? 0) + 1;
+    provider.slashCommands = new Set(["context"]);
+    return ["context"];
+  };
+  provider.send = async (threadId, text) => { provider.sendCall = { threadId, text }; return { turnId: "provider-turn" }; };
+  const conversation = createConversation({ provider: "claude" });
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/context");
+
+  assert.equal(result.handled, true);
+  assert.equal(provider.discoveryCalls, 1);
+  assert.deepEqual(provider.sendCall, { threadId: "provider-root", text: "/context" });
+  assert.deepEqual(rootScope(conversation).providerState.slashCommands, ["context"]);
+});
+
+test("Claude Code command names that overlap Codex commands use Claude dispatch", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.slashCommands = new Set(["compact"]);
+  provider.send = async (_threadId, text) => { provider.sent = text; return { turnId: "provider-turn" }; };
+  const conversation = createConversation({ provider: "claude" });
+  rootScope(conversation).providerState.slashCommands = ["compact"];
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/compact");
+
+  assert.equal(result.handled, true);
+  assert.equal(provider.sent, "/compact");
+  assert.equal(provider.compactThread, undefined);
+});
+
+test("Threadline-local commands keep precedence over Claude names", async () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.slashCommands = new Set(["diff"]);
+  provider.send = async (_threadId, text) => { provider.sent = text; return { turnId: "provider-turn" }; };
+  const conversation = createConversation({ provider: "claude" });
+  rootScope(conversation).providerState.slashCommands = ["diff"];
+  const controller = new Controller({ conversation, provider });
+
+  const result = await controller.executeSlashCommand("/diff");
+
+  assert.equal(result.handled, true);
+  assert.equal(result.title, "Git diff");
+  assert.equal(provider.sent, undefined);
+});
+
+test("Claude command discovery is scoped to the active provider session", () => {
+  const provider = new FakeProvider();
+  provider.displayName = "Claude Code";
+  provider.slashCommands = new Set(["child-only"]);
+  const conversation = createConversation({ provider: "claude" });
+  const root = rootScope(conversation);
+  root.providerState.slashCommands = ["root-only"];
+  const child = addBranch(conversation, root.id, makeAnchor(completedSource(conversation).turn, { start: 0, end: 7, text: "A focuse", blockType: "paragraph" }), "child");
+  child.providerState = { slashCommands: ["child-only"] };
+  const controller = new Controller({ conversation, provider });
+
+  conversation.activeScopeId = root.id;
+  assert.equal(controller.slashCommands().some((command) => command.name === "root-only"), true);
+  assert.equal(controller.slashCommands().some((command) => command.name === "child-only"), false);
+  conversation.activeScopeId = child.id;
+  assert.equal(controller.slashCommands().some((command) => command.name === "root-only"), false);
+  assert.equal(controller.slashCommands().some((command) => command.name === "child-only"), true);
+});
+
 test("turn started notification binds protocol-driven command turns", () => {
   const provider = new FakeProvider();
   const conversation = createConversation();
@@ -209,4 +357,53 @@ test("a nested thread forks from the selected child answer context", async () =>
 
   assert.deepEqual(provider.forkArguments, { threadId: "provider-child", turnId: "child-provider-turn" });
   assert.equal(nested.parentId, child.id);
+});
+
+test("tail-only providers reject old answers before creating a provider fork", async () => {
+  const provider = new FakeProvider();
+  provider.forkMode = "tail-only";
+  provider.displayName = "Tail Provider";
+  const conversation = createConversation({ provider: "claude" });
+  const scope = rootScope(conversation);
+  scope.providerThreadId = "provider-root";
+  const oldTurn = addTurn(conversation, scope.id, "old question");
+  oldTurn.providerTurnId = "old-turn";
+  oldTurn.assistant.text = "Old answer.";
+  oldTurn.assistant.status = "complete";
+  const latestTurn = addTurn(conversation, scope.id, "latest question");
+  latestTurn.providerTurnId = "latest-turn";
+  latestTurn.assistant.text = "Latest answer.";
+  latestTurn.assistant.status = "complete";
+  const controller = new Controller({ conversation, provider });
+  const segment = segmentsForTurn(oldTurn)[0];
+
+  assert.deepEqual(controller.threadCapacity(scope.id, oldTurn.id, segment), {
+    allowed: false,
+    code: "provider-tail-fork-only",
+    message: "Tail Provider can create a deep dive only from the latest completed answer in this scope.",
+  });
+  await assert.rejects(
+    controller.dive(scope.id, oldTurn.id, segment, "follow up"),
+    (error) => error.code === "provider-tail-fork-only",
+  );
+  assert.equal(provider.forkCalls ?? 0, 0);
+});
+
+test("tail-only providers reject a completed answer when a newer turn is unfinished", () => {
+  const provider = new FakeProvider();
+  provider.forkMode = "tail-only";
+  provider.displayName = "Tail Provider";
+  const conversation = createConversation({ provider: "claude" });
+  const scope = rootScope(conversation);
+  const complete = addTurn(conversation, scope.id, "complete question");
+  complete.providerTurnId = "complete-turn";
+  complete.assistant.text = "Complete answer.";
+  complete.assistant.status = "complete";
+  addTurn(conversation, scope.id, "still running");
+  const controller = new Controller({ conversation, provider });
+
+  assert.equal(
+    controller.threadCapacity(scope.id, complete.id, segmentsForTurn(complete)[0]).code,
+    "provider-tail-fork-only",
+  );
 });

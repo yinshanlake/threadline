@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { executeSlashCommand, SLASH_COMMANDS } from "./commands.mjs";
+import { executeSlashCommand, SLASH_COMMANDS, THREADLINE_SLASH_NAMES } from "./commands.mjs";
 import {
   addBranch,
   addTurn,
@@ -43,12 +43,43 @@ export class Controller extends EventEmitter {
 
   async start() {
     const info = await this.provider.connect();
-    this.status = this.conversation.provider === "demo" ? "Demo mode" : `Codex connected  ${info.platformFamily ?? "unknown platform"}`;
+    if (this.conversation.provider === "claude" && typeof this.provider.discoverSlashCommands === "function") {
+      try {
+        const commands = await this.provider.discoverSlashCommands();
+        for (const scope of this.conversation.scopes) {
+          scope.providerState = { ...scope.providerState, slashCommands: [...commands] };
+        }
+        this.persist();
+      } catch (error) {
+        this.emit("protocol-error", {
+          message: `Claude Code slash-command discovery failed: ${error.message}`,
+          error,
+        });
+      }
+    }
+    this.status = this.conversation.provider === "demo" ? "Demo mode" : `${this.providerLabel()} connected  ${info.platformFamily ?? "unknown platform"}`;
     this.changed();
     return info;
   }
 
-  slashCommands() { return SLASH_COMMANDS; }
+  slashCommands() {
+    if (this.conversation.provider !== "claude") return SLASH_COMMANDS;
+    const local = SLASH_COMMANDS.filter((command) => THREADLINE_SLASH_NAMES.has(command.name));
+    const localNames = new Set(local.map((command) => command.name));
+    const scope = findScope(this.conversation, this.conversation.activeScopeId);
+    const commands = Array.isArray(scope?.providerState?.slashCommands)
+      ? scope.providerState.slashCommands
+      : [...(this.provider.slashCommands ?? [])];
+    const native = commands
+      .filter((name, index, names) => typeof name === "string" && !localNames.has(name) && names.indexOf(name) === index)
+      .map((name) => ({ name, description: "Claude Code command", provider: "claude" }));
+    return [...local, ...native];
+  }
+
+  providerLabel() {
+    if (this.provider.displayName) return this.provider.displayName;
+    return ({ claude: "Claude Code", demo: "Demo" })[this.conversation.provider] ?? "Codex";
+  }
 
   async executeSlashCommand(input) {
     const result = await executeSlashCommand(this, input);
@@ -59,7 +90,7 @@ export class Controller extends EventEmitter {
 
   addCommandTurn(scopeId, text) {
     const turn = addTurn(this.conversation, scopeId, text);
-    this.status = "Codex is working…";
+    this.status = `${this.providerLabel()} is working…`;
     this.changed();
     return turn;
   }
@@ -71,7 +102,10 @@ export class Controller extends EventEmitter {
     if (this.scopeLoads.has(scopeId)) return this.scopeLoads.get(scopeId);
     const loading = (async () => {
       if (scope.providerThreadId) {
-        const resumed = await this.provider.resumeThread(scope.providerThreadId, { cwd: this.conversation.cwd });
+        const resumed = await this.provider.resumeThread(scope.providerThreadId, {
+          cwd: this.conversation.cwd,
+          state: scope.providerState,
+        });
         scope.providerThreadId = resumed.threadId;
         scope.providerState = { ...scope.providerState, ...(resumed.state ?? {}) };
       } else {
@@ -101,7 +135,7 @@ export class Controller extends EventEmitter {
       this.busyScopes.delete(scopeId);
       throw error;
     }
-    this.status = "Codex is working…";
+    this.status = `${this.providerLabel()} is working…`;
     this.changed();
     try {
       const result = await this.provider.send(scope.providerThreadId, providerText);
@@ -131,6 +165,12 @@ export class Controller extends EventEmitter {
       if (sourceTurn.assistant.status !== "complete") throw new Error("Wait for the selected answer to finish before branching");
       if (!sourceTurn.providerTurnId && this.conversation.provider !== "demo") {
         throw new Error("This answer predates provider turn metadata and cannot be forked safely");
+      }
+      const providerCapacity = this.#providerThreadCapacity(parentScopeId, sourceTurn);
+      if (providerCapacity) {
+        const error = new Error(providerCapacity.message);
+        error.code = providerCapacity.code;
+        throw error;
       }
       const anchor = makeAnchor(sourceTurn, segment);
       const duplicate = duplicateBranchAt(this.conversation, parentScopeId, anchor, value);
@@ -179,7 +219,20 @@ export class Controller extends EventEmitter {
     if (!sourceTurn) {
       return { allowed: false, code: "missing-source-turn", message: "The selected source turn no longer exists" };
     }
+    const providerCapacity = this.#providerThreadCapacity(parentScopeId, sourceTurn);
+    if (providerCapacity) return { allowed: false, ...providerCapacity };
     return branchCapacity(this.conversation, parentScopeId, makeAnchor(sourceTurn, segment), this.threadLimits);
+  }
+
+  #providerThreadCapacity(parentScopeId, sourceTurn) {
+    if (this.provider.forkMode !== "tail-only") return null;
+    const scope = findScope(this.conversation, parentScopeId);
+    const tail = scope?.turns?.at(-1);
+    if (tail?.id === sourceTurn.id && tail.assistant.status === "complete") return null;
+    return {
+      code: "provider-tail-fork-only",
+      message: `${this.providerLabel()} can create a deep dive only from the latest completed answer in this scope.`,
+    };
   }
 
   setActiveScope(scopeId) {
@@ -237,7 +290,7 @@ export class Controller extends EventEmitter {
     pending.answers[question.id] = { answers: value ? [value] : [] };
     pending.index += 1;
     if (pending.index < pending.questions.length) {
-      this.status = "Codex needs more input";
+      this.status = `${this.providerLabel()} needs more input`;
       this.changed();
       return;
     }
@@ -252,7 +305,7 @@ export class Controller extends EventEmitter {
     const scope = findScope(this.conversation, this.conversation.activeScopeId);
     const turn = scope ? findStreamingTurn(this.conversation, scope.id) : null;
     if (!scope?.providerThreadId || !turn?.providerTurnId) return false;
-    this.status = "Interrupting Codex…";
+    this.status = `Interrupting ${this.providerLabel()}…`;
     this.changed();
     try {
       await this.provider.interrupt(scope.providerThreadId, turn.providerTurnId);
@@ -332,7 +385,7 @@ export class Controller extends EventEmitter {
         this.changed();
       }
       if (["commandExecution", "fileChange", "mcpToolCall"].includes(event.item?.type)) {
-        this.status = "Codex is working…";
+        this.status = `${this.providerLabel()} is working…`;
       }
       if (event.item?.type !== "agentMessage") return;
       const { scope, turn } = this.#scopeAndTurn(event.threadId, event.turnId);
@@ -394,6 +447,7 @@ export class Controller extends EventEmitter {
       if (!scope || !turn) return;
       const status = event.status === "completed" ? "complete" : (event.status || "failed");
       completeTurn(this.conversation, scope.id, turn.id, status);
+      if (event.state) scope.providerState = { ...scope.providerState, ...event.state };
       for (const activity of turn.assistant.activities ?? []) {
         if (["inProgress", "running"].includes(activity.status)) activity.status = status === "complete" ? "completed" : status;
       }
@@ -425,6 +479,9 @@ export class Controller extends EventEmitter {
         effort: settings.effort ?? settings.reasoningEffort ?? scope.providerState?.effort ?? null,
         personality: settings.personality ?? scope.providerState?.personality ?? null,
         collaborationMode: settings.collaborationMode ?? scope.providerState?.collaborationMode ?? null,
+        slashCommands: Array.isArray(settings.slashCommands)
+          ? settings.slashCommands
+          : scope.providerState?.slashCommands ?? [],
       };
       this.persist(); this.changed();
     });
@@ -440,7 +497,7 @@ export class Controller extends EventEmitter {
       const supported = new Set(["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput"]);
       if (!supported.has(request.method)) {
         this.provider.rejectServerRequest(request);
-        this.status = `Unsupported Codex request: ${request.method}`;
+        this.status = `Unsupported ${this.providerLabel()} request: ${request.method}`;
         this.changed();
         return;
       }
@@ -481,10 +538,10 @@ export class Controller extends EventEmitter {
       const questions = request.params?.questions ?? [];
       if (!questions.length) { this.provider.resolveUserInput(request, {}); return; }
       this.pendingUserInput = { request, questions, index: 0, answers: {} };
-      this.status = "Codex needs input";
+      this.status = `${this.providerLabel()} needs input`;
       return;
     }
     this.pendingApproval = request;
-    this.status = "Codex needs a decision";
+    this.status = `${this.providerLabel()} needs a decision`;
   }
 }

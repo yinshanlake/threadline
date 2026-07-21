@@ -18,8 +18,24 @@ test("CLI documents configurable thread limits", async () => {
   assert.match(stdout, /--max-depth N/);
   assert.match(stdout, /--max-per-anchor N/);
   assert.match(stdout, /--yolo/);
+  assert.match(stdout, /--provider NAME/);
+  assert.match(stdout, /--claude/);
   assert.match(stdout, /resume SESSION_GUID/);
   assert.match(stdout, /threadline demo/);
+});
+
+test("CLI probes the selected Claude Code executable", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadline-cli-claude-"));
+  const fake = path.join(directory, "fake-claude.mjs");
+  try {
+    await import("node:fs/promises").then(({ writeFile }) => writeFile(fake, "console.log('2.1.207 (Claude Code)');\n", "utf8"));
+    const { stdout } = await execFileAsync(process.execPath, [cli, "--provider", "claude", "--probe"], {
+      cwd: project, env: { ...process.env, THREADLINE_CLAUDE_PATH: fake },
+    });
+    assert.match(stdout, /Claude Code OK: 2\.1\.207/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("demo subcommand always starts the interactive showcase", () => {
@@ -34,6 +50,17 @@ test("CLI rejects invalid thread limits before starting a provider", async () =>
   await assert.rejects(
     execFileAsync(process.execPath, [cli, "--max-threads", "0", "--snapshot"], { cwd: project }),
     (error) => error.code === 1 && /requires a positive integer/.test(error.stderr),
+  );
+});
+
+test("CLI rejects conflicting provider modes before starting a provider", async () => {
+  await assert.rejects(
+    execFileAsync(process.execPath, [cli, "--demo", "--claude", "--snapshot"], { cwd: project }),
+    (error) => error.code === 1 && /cannot be used together/.test(error.stderr),
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [cli, "--demo", "--yolo", "--snapshot"], { cwd: project }),
+    (error) => error.code === 1 && /cannot be used together/.test(error.stderr),
   );
 });
 

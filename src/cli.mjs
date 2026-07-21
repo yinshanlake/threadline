@@ -4,6 +4,7 @@ import process from "node:process";
 import { Controller } from "./controller.mjs";
 import { LineApp } from "./line.mjs";
 import { createConversation, createDemoConversation } from "./model.mjs";
+import { ClaudeProvider } from "./providers/claude.mjs";
 import { CodexProvider } from "./providers/codex.mjs";
 import { DemoProvider } from "./providers/demo.mjs";
 import { renderSnapshot } from "./render.mjs";
@@ -16,10 +17,12 @@ function usage() {
     "Usage: threadline [options]",
     "       threadline demo [options]",
     "       threadline resume SESSION_GUID [options]", "",
-    "  demo               Open a fresh interactive feature showcase (no Codex)",
-    "  --demo             Run without Codex using a resumable demo session",
+    "  demo               Open a fresh interactive feature showcase (no provider)",
+    "  --demo             Run without a live provider using a resumable demo session",
+    "  --provider NAME    Use codex or claude (default: codex)",
+    "  --claude           Shortcut for --provider claude",
     "  --snapshot         Print the current/demo transcript and exit",
-    "  --probe            Verify the Codex app-server handshake and exit",
+    "  --probe            Verify the selected provider executable and exit",
     "  --line             Force portable line mode",
     "  --no-alt-screen    Keep terminal scrollback instead of alternate screen",
     "  --new              Ignore the saved conversation",
@@ -42,11 +45,17 @@ function positiveIntegerOption(arg, value) {
 }
 
 function parseArgs(argv) {
-  const options = { demo: false, snapshot: false, probe: false, line: false, noAltScreen: false, fresh: false, resume: null, yolo: false, session: null, cwd: process.cwd(), cwdExplicit: false, colors: !process.env.NO_COLOR, threadLimits: {} };
+  const options = { demo: false, provider: "codex", snapshot: false, probe: false, line: false, noAltScreen: false, fresh: false, resume: null, yolo: false, session: null, cwd: process.cwd(), cwdExplicit: false, colors: !process.env.NO_COLOR, threadLimits: {} };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "demo") { options.demo = true; options.fresh = true; }
     else if (arg === "--demo") options.demo = true;
+    else if (arg === "--claude") options.provider = "claude";
+    else if (arg === "--provider") {
+      const value = argv[++index]?.toLowerCase();
+      if (!["codex", "claude"].includes(value)) throw new Error("--provider requires codex or claude");
+      options.provider = value;
+    }
     else if (arg === "--snapshot") options.snapshot = true;
     else if (arg === "--probe") options.probe = true;
     else if (arg === "--line") options.line = true;
@@ -70,20 +79,26 @@ function parseArgs(argv) {
   }
   if (options.resume && options.fresh) throw new Error("resume and --new cannot be used together");
   if (options.resume && options.session) throw new Error("resume and --session cannot be used together");
+  if (options.demo && options.provider !== "codex") throw new Error("--demo and --provider/--claude cannot be used together");
+  if (options.demo && options.yolo) throw new Error("--demo and --yolo cannot be used together");
   return options;
 }
 
 function resumeCommand(options, sessionId) {
-  return ["threadline", "resume", sessionId, options.demo ? "--demo" : null, options.yolo ? "--yolo" : null].filter(Boolean).join(" ");
+  return ["threadline", "resume", sessionId, options.demo ? "--demo" : null, !options.demo && options.provider !== "codex" ? "--provider " + options.provider : null, options.yolo ? "--yolo" : null].filter(Boolean).join(" ");
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(usage()); return; }
-  const providerName = options.demo ? "demo" : "codex";
-  const provider = options.demo ? new DemoProvider() : new CodexProvider({ cwd: options.cwd, yolo: options.yolo });
+  const providerName = options.demo ? "demo" : options.provider;
+  const provider = options.demo
+    ? new DemoProvider()
+    : providerName === "claude"
+      ? new ClaudeProvider({ cwd: options.cwd, yolo: options.yolo })
+      : new CodexProvider({ cwd: options.cwd, yolo: options.yolo });
   if (options.probe) {
-    const info = await provider.connect(); console.log(`Codex app-server OK: ${info.userAgent}`); await provider.close(); return;
+    const info = await provider.connect(); console.log(`${providerName === "claude" ? "Claude Code" : "Codex app-server"} OK: ${info.userAgent}`); await provider.close(); return;
   }
   const initialLatestFile = defaultSessionPath(options.cwd, providerName);
   const requestedFile = options.resume ? sessionIdPath(options.resume, providerName) : (options.session || initialLatestFile);
@@ -93,7 +108,8 @@ async function main() {
   }
   let conversation = options.fresh ? null : await loadConversation(requestedFile);
   if (options.resume && !conversation) throw new Error(`No saved Threadline session found for ${options.resume}`);
-  if (!conversation) conversation = options.demo ? createDemoConversation() : createConversation({ provider: "codex", cwd: options.cwd });
+  if (!conversation) conversation = options.demo ? createDemoConversation() : createConversation({ provider: providerName, cwd: options.cwd });
+  if (!options.demo && conversation.provider !== providerName) throw new Error(`Saved session uses ${conversation.provider}; rerun with --provider ${conversation.provider}`);
   if (options.cwdExplicit) conversation.cwd = options.cwd;
   const runtimeCwd = conversation.cwd || options.cwd;
   if (!options.demo) provider.cwd = runtimeCwd;

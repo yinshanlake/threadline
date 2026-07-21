@@ -1,6 +1,6 @@
 import { findScope, findStreamingTurn } from "./model.mjs";
 import { ansi, applyTone, approvalText, breadcrumb, buildConversationView, conversationStats, lineContainsSelection, overviewView, renderLine } from "./render.mjs";
-import { displayWidth, graphemes, sanitizeTerminalText, truncate, wrapDisplayText } from "./text.mjs";
+import { displayWidth, graphemes, sanitizeTerminalText, terminalPlainText, truncate, wrapDisplayText } from "./text.mjs";
 import { Terminal } from "./terminal.mjs";
 
 function selectableKey(item) {
@@ -574,7 +574,7 @@ export class TuiApp {
       prompt = applyTone(` ${modeLabel}${position}`, "thread", false, this.colors);
       helpText = truncate(` Esc back to input   ↑↓ move   ${action}   V detail   T threads`, width);
     } else {
-      const context = this.mode === "dive-input" ? truncate(sanitizeTerminalText(this.pendingDive?.segment?.text || "selection"), 24) : "";
+      const context = this.mode === "dive-input" ? truncate(terminalPlainText(this.pendingDive?.segment?.text || "selection", this.pendingDive?.segment?.blockType).replace(/\s+/gu, " "), 24) : "";
       const label = context ? ` ask here  ${context}  › ` : `${" ".repeat(contentInset)}› `;
       const before = graphemes(this.input).slice(0, this.cursor).join("");
       const after = graphemes(this.input).slice(this.cursor).join("");
