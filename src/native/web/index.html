@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Threadline</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="brand">Threadline <span>Codex</span></div>
+    <div id="workspace-path" class="workspace-path"></div>
+    <button id="toggle-panel" aria-controls="sidebar" aria-expanded="true">Branches <kbd>Ctrl+Shift+B</kbd></button>
+  </header>
+  <main id="layout" class="layout">
+    <section class="terminal-pane" aria-label="Codex terminal">
+      <div class="terminal-toolbar">
+        <span id="active-title">Main conversation</span>
+        <span id="connection" role="status">Connecting</span>
+      </div>
+      <div id="terminal"></div>
+      <div class="terminal-footer">Use Codex normally. Select a passage in the panel to explore it.</div>
+    </section>
+    <aside id="sidebar" class="sidebar" aria-label="Conversation branches">
+      <div class="panel-toolbar">
+        <h1>Branches</h1>
+        <button id="back" disabled>Return to parent</button>
+      </div>
+      <nav id="tree" aria-label="Branch tree"></nav>
+      <div class="answer-toolbar"><h2>Answers</h2><button id="refresh">Refresh</button></div>
+      <div id="source-anchor" hidden></div>
+      <div id="answers" class="answers"><p class="empty">Completed answers appear here. Select any passage to start a follow-up.</p></div>
+      <form id="follow-up" hidden>
+        <div class="selection-heading"><label for="question">Follow-up on this passage</label><button id="cancel-selection" type="button" aria-label="Clear selection">Clear</button></div>
+        <blockquote id="selected-quote"></blockquote>
+        <textarea id="question" rows="3" maxlength="16000" placeholder="What would you like to explore?" required></textarea>
+        <button id="ask" class="primary" type="submit">Open branch</button>
+      </form>
+      <p id="message" role="status" hidden></p>
+    </aside>
+  </main>
+</body>
+</html>

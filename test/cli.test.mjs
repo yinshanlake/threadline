@@ -22,6 +22,8 @@ test("CLI documents configurable thread limits", async () => {
   assert.match(stdout, /--claude/);
   assert.match(stdout, /resume SESSION_GUID/);
   assert.match(stdout, /threadline demo/);
+  assert.match(stdout, /--native/);
+  assert.match(stdout, /--port N/);
 });
 
 test("CLI probes the selected Claude Code executable", async () => {
@@ -62,6 +64,12 @@ test("CLI rejects conflicting provider modes before starting a provider", async 
     execFileAsync(process.execPath, [cli, "--demo", "--yolo", "--snapshot"], { cwd: project }),
     (error) => error.code === 1 && /cannot be used together/.test(error.stderr),
   );
+});
+
+test("native mode rejects unsupported providers and conflicting modes", async () => {
+  for (const args of [["--native", "--claude"], ["--native", "--line"], ["--port", "4318"], ["--native", "--port", "70000"]]) {
+    await assert.rejects(execFileAsync(process.execPath, [cli, ...args], { cwd: project }), (error) => error.code === 1);
+  }
 });
 
 test("probe starts Codex with the legacy ado MCP disabled", async () => {

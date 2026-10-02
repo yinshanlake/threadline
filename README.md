@@ -4,6 +4,54 @@ Threadline is a terminal UI for branching from an exact passage in an LLM CLI an
 
 Threadline supports Codex and Claude Code. It uses provider sessions for model context and a local scope tree for navigation, persistence, and rendering.
 
+## Native Codex terminal with a branch sidebar
+
+The experimental native mode runs the actual Codex CLI in a browser terminal beside a passage-selection and branch panel. Slash commands, completion, model menus, and approvals are handled by Codex itself. Threadline sends keyboard input to a PTY and does not maintain a slash-command translation table in this mode.
+
+From a local checkout:
+
+```bash
+npm install
+npm run native
+```
+
+Open the local browser link printed in the terminal. It connects only to a server on `127.0.0.1`. The server keeps running until you press `Ctrl+C` in the launching terminal.
+
+1. Work normally in the Codex terminal. Completed answers appear in the sidebar.
+2. Select a passage in an answer with the mouse, enter a follow-up, and choose **Open branch**. Threadline forks through that answer's provider turn and opens the child in another native Codex terminal.
+3. Choose **Return to parent** or a conversation in the branch tree. The parent and child terminals stay alive, and switching restores their screen state. Child answers can create nested branches.
+4. Use `Ctrl+Shift+B` or **Branches** to hide or show the sidebar. Resize the browser or reload the page without losing the branch tree or running terminal.
+
+The first version supports Codex only. It prefers the Codex installation on your PATH so the terminal and session operations use the same version; `THREADLINE_CODEX_PATH` can select an explicit executable or JavaScript entrypoint. A bundled Codex is used only when no local installation is found. Model conversations still use your existing Codex login and configuration.
+
+Branch creation uses the structured app-server `thread/fork` API with `lastTurnId`. The temporary app-server closes before the native child starts. History reads use `thread/read` without resuming the parent. The documented Codex `notify` callback identifies completed native turns; the callback override applies only to child processes, and an existing notification program is forwarded the original event. No global Codex configuration is changed. Answers appear after a turn completes; live output and approvals remain in the terminal.
+
+Native layouts are saved separately from the original Threadline TUI sessions. On shutdown, Threadline prints a resume command:
+
+```bash
+threadline resume SESSION_GUID --native
+# Or select a fixed localhost port:
+threadline --native --port 4318
+```
+
+Forks isolate conversation history. The native agents still share the chosen working directory, so edits in one branch are visible to the others. Codex's app-server and session protocol remain experimental; errors are shown in the sidebar rather than repaired by rewriting transcript files.
+
+Try the complete flow without a model connection:
+
+```bash
+npm run native:demo
+```
+
+The demo uses an offline terminal fixture, not Codex. Test native mode with:
+
+```bash
+npm test
+npx playwright install chromium
+npm run test:native-browser
+```
+
+The browser test covers exact Chinese/emoji selection, nested forks, parent return, literal slash input, terminal reconnection, and layout resizing. Regular tests cover session persistence, duplicate forks, stale selections, provider limits, authenticated local requests, and PTY input/output.
+
 ## What it looks like
 
 ![Threadline full-screen demo showing inline and nested threads](docs/images/threadline-demo-wide.png)

@@ -70,11 +70,12 @@ function defaultCommand({ yolo = false } = {}) {
 }
 
 export class CodexProvider extends EventEmitter {
-  constructor({ command = null, cwd = process.cwd(), requestTimeout = DEFAULT_TIMEOUT, yolo = false } = {}) {
+  constructor({ command = null, cwd = process.cwd(), requestTimeout = DEFAULT_TIMEOUT, yolo = false, env = process.env } = {}) {
     super();
     this.command = command ?? defaultCommand({ yolo });
     this.yolo = yolo;
     this.cwd = cwd;
+    this.env = env;
     this.requestTimeout = requestTimeout;
     this.child = null;
     this.nextId = 1;
@@ -99,7 +100,7 @@ export class CodexProvider extends EventEmitter {
 
     this.child = spawn(this.command.file, this.command.args ?? [], {
       cwd: this.cwd,
-      env: process.env,
+      env: this.env,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
