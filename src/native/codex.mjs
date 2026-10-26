@@ -1,9 +1,16 @@
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { CodexProvider } from "../providers/codex.mjs";
 
 const require = createRequire(import.meta.url);
+
+export function nativeCommandCapabilities(command, readHelp = () => execFileSync(command.file, [...command.args, "--help"], {
+  encoding: "utf8", timeout: 10000, windowsHide: true, env: nativeEnvironment(),
+})) {
+  return { ...command, supportsNoDaemon: /(?:^|\s)--no-daemon(?:\s|$)/u.test(readHelp()) };
+}
 
 export function nativeEnvironment(env = process.env) {
   const result = { ...env };

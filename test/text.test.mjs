@@ -8,6 +8,13 @@ test("displayWidth handles Latin, CJK, and emoji", () => {
   assert.equal(displayWidth("🙂"), 2);
 });
 
+test("source mapped rendering keeps surrogate pairs and emoji sequences as one grapheme", () => {
+  const source = "**中文🌱👩‍💻**";
+  const entries = terminalMarkup(source);
+  assert.deepEqual(entries.map((entry) => entry.text), ["中", "文", "🌱", "👩‍💻"]);
+  for (const entry of entries) assert.equal(source.slice(entry.sourceStart, entry.sourceEnd), entry.text);
+});
+
 test("wrapText respects terminal cell width", () => {
   assert.deepEqual(wrapText("缓存abc", 5), ["缓存a", "bc"]);
 });

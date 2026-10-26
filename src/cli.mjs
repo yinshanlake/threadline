@@ -22,6 +22,7 @@ function usage() {
     "  --provider NAME    Use codex or claude (default: codex)",
     "  --claude           Shortcut for --provider claude",
     "  --native           Open a native Codex terminal with a browser branch sidebar",
+    "  --terminal         Native Codex and history panels inside your terminal",
     "  --port N           Local sidebar port (default: a free port; requires --native)",
     "  --snapshot         Print the current/demo transcript and exit",
     "  --probe            Verify the selected provider executable and exit",
@@ -47,13 +48,14 @@ function positiveIntegerOption(arg, value) {
 }
 
 function parseArgs(argv) {
-  const options = { demo: false, provider: "codex", native: false, port: 0, snapshot: false, probe: false, line: false, noAltScreen: false, fresh: false, resume: null, yolo: false, session: null, cwd: process.cwd(), cwdExplicit: false, colors: !process.env.NO_COLOR, threadLimits: {} };
+  const options = { demo: false, provider: "codex", native: false, terminal: false, port: 0, snapshot: false, probe: false, line: false, noAltScreen: false, fresh: false, resume: null, yolo: false, session: null, cwd: process.cwd(), cwdExplicit: false, colors: !process.env.NO_COLOR, threadLimits: {} };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "demo") { options.demo = true; options.fresh = true; }
     else if (arg === "--demo") options.demo = true;
     else if (arg === "--claude") options.provider = "claude";
     else if (arg === "--native") options.native = true;
+    else if (arg === "--terminal") options.terminal = true;
     else if (arg === "--port") {
       const value = Number(argv[++index]);
       if (!Number.isInteger(value) || value < 0 || value > 65535) throw new Error("--port requires an integer between 0 and 65535");
@@ -90,6 +92,7 @@ function parseArgs(argv) {
   if (options.demo && options.provider !== "codex") throw new Error("--demo and --provider/--claude cannot be used together");
   if (options.demo && options.yolo) throw new Error("--demo and --yolo cannot be used together");
   if (options.portExplicit && !options.native) throw new Error("--port requires --native");
+  if (options.terminal && options.native) throw new Error("--terminal and --native cannot be used together");
   return options;
 }
 
@@ -100,6 +103,10 @@ function resumeCommand(options, sessionId) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(usage()); return; }
+  if (options.terminal) {
+    const { runConsoleApp } = await import("./native/console-app.mjs");
+    await runConsoleApp(options); return;
+  }
   if (options.native) {
     const { runNativeApp } = await import("./native/app.mjs");
     await runNativeApp(options); return;

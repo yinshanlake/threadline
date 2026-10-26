@@ -354,6 +354,7 @@ function mathRange(entries, source, start, end, base, tone = "math") {
 }
 
 function inlineRange(entries, source, start, end, base, tone) {
+  const literalLengths = new Map(graphemeEntries(source.slice(start, end)).map((entry) => [start + entry.index, entry.segment.length]));
   let index = start;
   while (index < end) {
     if (source.startsWith("<br>", index) || source.startsWith("<br/>", index) || source.startsWith("<br />", index)) {
@@ -436,8 +437,9 @@ function inlineRange(entries, source, start, end, base, tone) {
         inlineRange(entries, source, index + 1, close, base, "emphasis"); index = close + 1; continue;
       }
     }
-    rawRange(entries, source, index, index + 1, base, tone);
-    index += 1;
+    const literalLength = literalLengths.get(index) || 1;
+    rawRange(entries, source, index, index + literalLength, base, tone);
+    index += literalLength;
   }
 }
 
@@ -726,22 +728,22 @@ export function textSegments(text) {
   return result;
 }
 
-export function wrapAnnotatedText(text, width, { sourceStart = 0, ranges = [], type = "paragraph" } = {}) {
+export function wrapAnnotatedText(text, width, { sourceStart = 0, ranges = [], type = "paragraph", sourceMap = false } = {}) {
   const limit = Math.max(1, width);
   const entries = [];
   let column = 0;
   const toParts = (line) => {
     const parts = [];
-    const append = (value, selectableIndex, tone) => {
+    const append = (value, selectableIndex, tone, sourceStart, sourceEnd) => {
       const last = parts.at(-1);
-      if (last && last.selectableIndex === selectableIndex && last.tone === tone) last.text += value;
-      else parts.push({ text: value, selectableIndex, tone });
+      if (last && last.selectableIndex === selectableIndex && last.tone === tone && !sourceMap) last.text += value;
+      else parts.push({ text: value, selectableIndex, tone, ...(sourceMap ? { sourceStart, sourceEnd } : {}) });
     };
-    for (const entry of line) append(entry.text, entry.selectableIndex, entry.tone);
+    for (const entry of line) append(entry.text, entry.selectableIndex, entry.tone, entry.sourceStart, entry.sourceEnd);
     return { parts };
   };
-  const append = (value, itemWidth, selectableIndex, tone) => {
-    entries.push({ text: value, width: itemWidth, selectableIndex, tone });
+  const append = (value, itemWidth, selectableIndex, tone, sourceStart, sourceEnd) => {
+    entries.push({ text: value, width: itemWidth, selectableIndex, tone, sourceStart, sourceEnd });
   };
 
   for (const entry of terminalMarkupEntries(text, sourceStart, type)) {
@@ -752,7 +754,7 @@ export function wrapAnnotatedText(text, width, { sourceStart = 0, ranges = [], t
     const start = entry.sourceStart;
     const end = entry.sourceEnd;
     const range = ranges.find((candidate) => candidate.start < end && candidate.end > start);
-    append(visible, itemWidth, range?.selectableIndex, entry.tone);
+    append(visible, itemWidth, range?.selectableIndex, entry.tone, entry.sourceStart, entry.sourceEnd);
     column += itemWidth;
   }
   return wrapEntries(entries, limit).map(toParts);

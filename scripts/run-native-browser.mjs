@@ -6,4 +6,7 @@ const child = spawn(process.execPath, ["--test", "test/native-browser.test.mjs"]
   env: { ...process.env, THREADLINE_BROWSER_TESTS: "1" }, stdio: "inherit", windowsHide: true,
 });
 child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
-child.on("exit", (code) => { process.exitCode = code ?? 1; });
+child.on("exit", (code, signal) => {
+  if (signal) console.error("Browser tests ended with signal " + signal + ".");
+  process.exitCode = code ?? 1;
+});

@@ -23,11 +23,16 @@ export function importNativeThread(scope, thread) {
     const input = userText(items);
     const focused = scope.anchor && scope.native?.question && input.trim() === focusedPrompt(scope.anchor.exactQuote, scope.native.question).trim();
     if (scope.native?.pendingPrompt && input.trim() === scope.native.pendingPrompt.trim()) delete scope.native.pendingPrompt;
+    const submitted = scope.native?.submission;
+    if (submitted && input.trim() === submitted.text.trim() && turn.id !== submitted.afterTurnId && turn.status !== "inProgress") {
+      delete scope.native.submission;
+    }
     const messages = items.filter((item) => item.type === "agentMessage").map((item, index) => ({
       id: item.id || `${turn.id}-message-${index}`, text: item.text ?? "", phase: item.phase ?? null,
     }));
     return {
       id: existing?.id ?? `native-turn-${turn.id}`, providerTurnId: turn.id,
+      collapsed: Boolean(existing?.collapsed),
       user: { id: existing?.user?.id ?? `native-user-${turn.id}`, text: focused ? scope.native.question : input },
       assistant: {
         id: existing?.assistant?.id ?? `native-answer-${turn.id}`,
@@ -40,7 +45,10 @@ export function importNativeThread(scope, thread) {
     };
   });
   scope.native ??= {};
-  scope.native.title = thread.name || scope.native.title || (scope.parentId ? "Follow-up" : "Main conversation");
+  const firstQuestion = scope.turns[0]?.user.text?.split("\n")[0].trim().slice(0, 80);
+  const title = scope.native.title;
+  const generatedTitle = !scope.parentId && [undefined, "Main conversation", "New conversation", "Native conversation"].includes(title) ? firstQuestion : title;
+  scope.native.title = thread.name || generatedTitle || (scope.parentId ? "Follow-up" : "Main conversation");
 }
 
 export function focusedPrompt(quote, question) {
@@ -96,6 +104,8 @@ export class NativeWorkspace extends EventEmitter {
           id: scope.id, parentId: scope.parentId, threadId: scope.providerThreadId, anchor: scope.anchor,
           title: scope.native?.question || scope.native?.title || (scope.parentId ? "Follow-up" : "Main conversation"),
           turns: scope.turns, terminalId: entry?.id ?? null, pendingPrompt: Boolean(scope.native?.pendingPrompt),
+          collapsed: Boolean(scope.collapsed),
+          pendingSubmission: Boolean(scope.native?.submission), pendingText: scope.native?.submission?.text || null,
         };
       }),
     };
@@ -129,8 +139,12 @@ export class NativeWorkspace extends EventEmitter {
     });
     const entry = { id, scopeId, terminal };
     this.terminals.set(id, entry);
-    terminal.on("exit", ({ exitCode }) => {
-      this.notice = exitCode ? `Codex exited with code ${exitCode}. Reopen this conversation to continue.` : null;
+    terminal.on("exit", ({ exitCode, error }) => {
+      if (scope.native?.submission?.terminalId === id) {
+        delete scope.native.submission;
+        delete scope.native.pendingPrompt;
+      }
+      this.notice = error || (exitCode ? `Codex exited with code ${exitCode}. Reopen this conversation to continue.` : null);
       this.changed();
     });
     if (prompt) terminal.on("data", () => {
@@ -233,6 +247,7 @@ export class NativeWorkspace extends EventEmitter {
       // Persist the fork and its first prompt before launching the CLI. A
       // failed launch can be reopened without creating another provider fork.
       this.conversation.activeScopeId = child.id;
+      this.expandPath(child);
       this.changed();
       await this.writer?.flush();
       this.openTerminal(child.id);
@@ -245,6 +260,7 @@ export class NativeWorkspace extends EventEmitter {
     if (!this.terminalFor(scope.id)) await this.sync(scope.id);
     this.openTerminal(scope.id);
     this.conversation.activeScopeId = scope.id;
+    this.expandPath(scope);
     this.notice = null;
     this.changed();
     return scope;
@@ -253,13 +269,101 @@ export class NativeWorkspace extends EventEmitter {
   back() {
     const scope = this.scope();
     if (!scope.parentId) throw new Error("This conversation has no parent.");
+    scope.collapsed = true;
     return this.activate(scope.parentId);
+  }
+
+  expandPath(scope) {
+    const visited = new Set();
+    while (scope && !visited.has(scope.id)) {
+      visited.add(scope.id);
+      scope.collapsed = false;
+      scope = scope.parentId ? this.scope(scope.parentId) : null;
+    }
+  }
+
+  collapse({ scopeId, collapsed }) {
+    return this.transaction(() => {
+      if (typeof scopeId !== "string" || typeof collapsed !== "boolean") {
+        throw new Error("Choose a conversation and an explicit collapse state.");
+      }
+      const scope = this.scope(scopeId);
+      scope.collapsed = collapsed;
+      this.changed();
+      return scope;
+    });
+  }
+
+  newConversation() {
+    return this.transaction(async () => {
+      const scope = rootScope(createConversation({ cwd: this.conversation.cwd }));
+      scope.native = { title: "New conversation" };
+      if (this.demo) scope.providerThreadId = (await this.sessions.create()).id;
+      this.conversation.scopes.push(scope);
+      this.conversation.activeScopeId = scope.id;
+      this.notice = null;
+      this.changed();
+      await this.writer?.flush();
+      this.openTerminal(scope.id);
+      return scope;
+    });
+  }
+
+  sendMessage({ scopeId, text }) {
+    return this.transaction(async () => {
+      if (typeof scopeId !== "string" || typeof text !== "string" || !text.trim() || text.length > 16000) {
+        throw new Error("Enter a message of at most 16,000 characters.");
+      }
+      const value = text.trim().replace(/\r\n?/gu, "\n");
+      if (/[\x00-\x08\x0b-\x1f\x7f]/u.test(value)) throw new Error("The message contains unsupported control characters.");
+      if (value.startsWith("/")) throw new Error("Use the native terminal for slash commands.");
+      const scope = this.scope(scopeId);
+      if (scope.native?.submission || scope.native?.pendingPrompt || scope.turns.at(-1)?.assistant.status === "streaming") {
+        throw new Error("This conversation is still running. Open Terminal for progress or approvals.");
+      }
+      scope.native ??= {};
+      const submission = { text: value, afterTurnId: scope.turns.at(-1)?.providerTurnId || null, at: new Date().toISOString() };
+      if (!scope.turns.length && !scope.parentId) scope.native.title = value.split("\n")[0].slice(0, 80);
+      scope.native.submission = submission;
+      this.conversation.activeScopeId = scope.id;
+      this.expandPath(scope);
+      this.notice = null;
+      let launched = false;
+      try {
+        if (!scope.providerThreadId) {
+          const existing = this.terminalFor(scope.id);
+          if (existing) { await existing.terminal.stop?.(); existing.terminal.close(); this.terminals.delete(existing.id); }
+          scope.native.submission = submission;
+          scope.native.pendingPrompt = value;
+          this.changed();
+          await this.writer?.flush();
+          submission.terminalId = this.openTerminal(scope.id).id;
+          launched = true;
+        } else {
+          const entry = this.openTerminal(scope.id);
+          submission.terminalId = entry.id;
+          await entry.terminal.submit(value, { demo: this.demo });
+          launched = true;
+          this.changed();
+        }
+        await this.writer?.flush();
+      } catch (error) {
+        if (!launched && !scope.providerThreadId) {
+          delete scope.native.submission;
+          delete scope.native.pendingPrompt;
+        } else if (!launched) delete scope.native.submission;
+        this.changed();
+        throw error;
+      }
+      return scope;
+    });
   }
 
   async close() {
     this.closed = true;
     await this.pending.catch(() => {});
-    await Promise.all([...this.terminals.values()].map((entry) => entry.terminal.stop?.() ?? entry.terminal.close()));
+    await Promise.all([...this.terminals.values()].map((entry) =>
+      entry.terminal.stop?.(this.demo ? { input: "/quit\r" } : {}) ?? entry.terminal.close()));
     this.terminals.clear();
     await this.writer?.flush();
   }

@@ -1,6 +1,6 @@
 import { createConversation } from "../model.mjs";
 import { defaultSessionPath, loadConversation, sessionIdPath, SessionWriter } from "../store.mjs";
-import { resolveCodexCommand, CodexSessions } from "./codex.mjs";
+import { resolveCodexCommand, nativeCommandCapabilities, CodexSessions } from "./codex.mjs";
 import { nativeDemo } from "./demo.mjs";
 import { startNativeServer } from "./server.mjs";
 import { NativeWorkspace } from "./workspace.mjs";
@@ -18,7 +18,7 @@ export async function runNativeApp(options) {
   if (options.resume && !conversation) throw new Error(`No saved native sidebar session found for ${options.resume}`);
   conversation ??= createConversation({ cwd: options.cwd });
   if (options.cwdExplicit) conversation.cwd = options.cwd;
-  const command = demo?.command ?? resolveCodexCommand();
+  const command = demo?.command ?? nativeCommandCapabilities(resolveCodexCommand());
   const sessions = demo?.sessions ?? new CodexSessions({ command, cwd: conversation.cwd });
   const writer = options.demo ? null : new SessionWriter([
     sessionIdPath(conversation.sessionId, providerName), options.session || defaultSessionPath(conversation.cwd, providerName),

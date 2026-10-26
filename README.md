@@ -4,9 +4,65 @@ Threadline is a terminal UI for branching from an exact passage in an LLM CLI an
 
 Threadline supports Codex and Claude Code. It uses provider sessions for model context and a local scope tree for navigation, persistence, and rendering.
 
-## Native Codex terminal with a branch sidebar
+## Native Codex with terminal panels
 
-The experimental native mode runs the actual Codex CLI in a browser terminal beside a passage-selection and branch panel. Slash commands, completion, model menus, and approvals are handled by Codex itself. Threadline sends keyboard input to a PTY and does not maintain a slash-command translation table in this mode.
+`--terminal` keeps a collapsible conversation view on screen by default, with the real Codex input area underneath. Main questions, branch questions, source quotations, parent answers, and the latest reply have separate labels and visual hierarchy. It is an independent Threadline interface and needs no terminal multiplexer or browser.
+
+From this checkout:
+
+```powershell
+Set-Location -LiteralPath 'C:\path\to\threadline'
+npm run terminal
+```
+
+For the offline interaction showcase, use `npm run terminal:demo`. The real mode uses your installed Codex, configured model, login and permissions. It starts in input mode: typing, slash commands, Enter, Ctrl+C, and arrow keys go to Codex. The transcript remains visible during input.
+
+Press `Ctrl+B` once to wake browse mode. Arrows now select sentences or conversation headings; Enter asks a follow-up on a passage. Esc returns to input without hiding or replacing the conversation view. Press Ctrl+B twice consecutively from input mode to send a literal Ctrl+B to Codex.
+
+| In browse mode | Action |
+| --- | --- |
+| `↑` / `↓` | Select a sentence or heading. |
+| `Enter` | Ask about selected text or continue a selected conversation. |
+| `←` / `→` / `Space` | Fold or unfold a main question or branch. |
+| `Esc` | Return to Codex input; keep the transcript visible. |
+| `t` / `Tab` | Switch conversation tree/history. |
+| `b` | Return to the parent and the original passage. |
+| `n` | Start a new native Codex conversation. |
+| `r` | Reopen the current terminal after it exits. |
+| `d` | Expand/collapse native tool, progress and approval details. |
+| `?` | Show help. |
+| `q` | Save and exit Threadline. |
+
+Mouse dragging selects an exact raw quote even when Markdown, Chinese or emoji display differently. Enter opens the question popup; Enter submits, Esc returns to the source. `V` switches between sentence and block selection. Parent, child and nested conversations keep their own model histories. Branch headers show your question, a separate original-quote line, the answer role and the current input target. Only the latest completed turn receives a new-answer marker. Main question headings can also be folded, and their fold state survives history refreshes.
+
+Wide and narrow windows both keep the full-width transcript above the input area. The horizontal separator can be dragged to change the input area's height. The native area starts at 12 rows when space permits; browse-mode `d` expands it, and a detected approval prompt expands automatically. The child PTY receives the exact dimensions of its visible area, and Threadline paints that complete viewport rather than cropping a larger hidden terminal. This preserves native startup dialogs and command menus without maintaining a list of their names. Native cursor coordinates are projected into the input area so the outer terminal can position its input cursor. Terminal glyph widths remain dependent on the outer terminal and its fonts.
+
+Scrolling the transcript does not switch keyboard focus away from Codex. Click the transcript or press `Ctrl+B` to enter browse mode deliberately. In native input mode, slash text, its arguments, completion keys, and unrecognized future commands go directly to Codex; Threadline does not dispatch them through its own slash-command registry.
+
+The separator always shows the active Codex state: starting, working with elapsed time and current activity, waiting for confirmation, ready, or exited. It updates while you browse older replies and even when the terminal is temporarily silent. Compact mode retains the native live progress row above the input instead of hiding it. State is derived from the current native footer, title and progress controls; an unrecognized screen is labeled unknown rather than guessed. Completed output is not treated as proof that work is still running.
+
+Conversation layouts, input-area height, source selection and return positions are saved separately under the `terminal-codex` session namespace. Older saved panel layouts open in the new conversation-first view. On exit the app prints:
+
+```powershell
+threadline resume SESSION_GUID --terminal
+```
+
+Completed answers reach history through the native completion callback and structured provider reads. Live tools and approvals remain in Codex. Terminal snapshots are used only for painting, never to infer which model turn produced a selected historical quote. Branches share the workspace filesystem; they do not create Git worktrees.
+
+This first terminal-panel mode supports text, ANSI styling, native paste and SGR mouse reports. Clipboard image handling, full Kitty graphics passthrough, and every modern keyboard protocol combination are not implemented; test Chinese IME composition and image workflows in your own terminal before relying on them. A closed client stops its terminal processes after saving; this is not a detachable background multiplexer.
+
+`npm test` covers input routing, resize, source mapping, two-level branches, return positions and a real offline PTY flow. An optional live-model smoke test checks reply, fork and saved-session resume:
+
+```powershell
+$env:THREADLINE_LIVE_CONSOLE_TESTS = '1'
+node --test --test-name-pattern='real Codex terminal' test/console-terminal.test.mjs
+```
+
+Normal `npm install` / `npm ci` also applies a narrowly scoped fix to the pinned Unicode grapheme addon's trie reader: Node Buffers can have a nonzero byte offset, which the upstream 0.4.0 header reader ignores. The install step checks the exact dependency version and patch shape, is safe to run again, and fails explicitly if the upstream code changes. If installing with lifecycle scripts disabled, run `npm run postinstall` before native mode. The regression suite exercises both addon formats with deliberately offset Buffers.
+
+## Native Codex with expandable conversation history
+
+The experimental native mode opens the actual Codex CLI alongside an expandable reading view. Parent answers, inline follow-ups, nested questions, and earlier conversations stay in one transcript. The native terminal is visible by default and can be hidden explicitly while reading; slash commands, completion, model menus, and approvals are handled by Codex itself.
 
 From a local checkout:
 
@@ -17,14 +73,17 @@ npm run native
 
 Open the local browser link printed in the terminal. It connects only to a server on `127.0.0.1`. The server keeps running until you press `Ctrl+C` in the launching terminal.
 
-1. Work normally in the Codex terminal. Completed answers appear in the sidebar.
-2. Select a passage in an answer with the mouse, enter a follow-up, and choose **Open branch**. Threadline forks through that answer's provider turn and opens the child in another native Codex terminal.
-3. Choose **Return to parent** or a conversation in the branch tree. The parent and child terminals stay alive, and switching restores their screen state. Child answers can create nested branches.
-4. Use `Ctrl+Shift+B` or **Branches** to hide or show the sidebar. Resize the browser or reload the page without losing the branch tree or running terminal.
+1. Write a message in the conversation input and send with **Send** or `Ctrl+Enter`. Replies from your configured Codex model appear in the reading view. The header shows **Live Codex** for real sessions and **Offline demo** for simulated replies.
+2. Select a passage in any completed answer, including an earlier parent or child reply. A follow-up input unfolds beside the source over 480 ms; it is editable immediately, without resizing the native terminal or rebuilding the conversation tree. Cancel folds it away over 240 ms. Reduced-motion preferences skip the animation. Send with `Ctrl+Enter` or **Open branch**. The child inherits history through that answer and appears under its source paragraph.
+3. Expand or collapse a question to read its history without switching the active terminal. Selected passages inside a child can create nested follow-ups. **Past conversations** provides the full tree when needed.
+4. **Return to parent** folds the current branch and restores the source paragraph, scroll position, and previous terminal visibility. **Continue here** activates a chosen conversation and focuses its message input. Use **Terminal** for native slash commands, tools, approvals, or unfinished terminal input.
+5. **New conversation** focuses an empty message input. Sending its first message starts a fresh model session while retaining the previous conversations in the reading view. Earlier text remains selectable. Collapse state is saved with the session; page reload also restores the reading position.
+
+`Ctrl+Shift+B` toggles the conversation view. `Ctrl+Shift+Backquote` toggles the terminal. An open follow-up draft keeps its text and focus when other answers arrive. Markdown and common formula notation are rendered using Threadline's existing source mapping, so selecting formatted Chinese text, emoji, or a subscript still anchors the original raw text.
 
 The first version supports Codex only. It prefers the Codex installation on your PATH so the terminal and session operations use the same version; `THREADLINE_CODEX_PATH` can select an explicit executable or JavaScript entrypoint. A bundled Codex is used only when no local installation is found. Model conversations still use your existing Codex login and configuration.
 
-Branch creation uses the structured app-server `thread/fork` API with `lastTurnId`. The temporary app-server closes before the native child starts. History reads use `thread/read` without resuming the parent. The documented Codex `notify` callback identifies completed native turns; the callback override applies only to child processes, and an existing notification program is forwarded the original event. No global Codex configuration is changed. Answers appear after a turn completes; live output and approvals remain in the terminal.
+Branch creation uses the structured app-server `thread/fork` API with `lastTurnId`. The temporary app-server closes before the native child starts. History reads use `thread/read` without resuming the parent. The documented Codex `notify` callback identifies completed native turns; the callback override applies only to child processes, and an existing notification program is forwarded the original event. On CLI versions supporting `--no-daemon`, Threadline uses it so the per-window notification environment is retained instead of being inherited from a shared daemon. No global Codex configuration is changed. Answers appear after a turn completes; live output and approvals remain in the terminal.
 
 Native layouts are saved separately from the original Threadline TUI sessions. On shutdown, Threadline prints a resume command:
 
@@ -35,6 +94,8 @@ threadline --native --port 4318
 ```
 
 Forks isolate conversation history. The native agents still share the chosen working directory, so edits in one branch are visible to the others. Codex's app-server and session protocol remain experimental; errors are shown in the sidebar rather than repaired by rewriting transcript files.
+
+On Windows, each native terminal runs in its own hidden PTY helper process. This isolates node-pty's native handle state across branches and contains a terminal failure without closing the browser workspace. Closing Threadline first requests graceful terminal exit, then cleans up its own helpers.
 
 Try the complete flow without a model connection:
 
@@ -50,7 +111,7 @@ npx playwright install chromium
 npm run test:native-browser
 ```
 
-The browser test covers exact Chinese/emoji selection, nested forks, parent return, literal slash input, terminal reconnection, and layout resizing. Regular tests cover session persistence, duplicate forks, stale selections, provider limits, authenticated local requests, and PTY input/output.
+Browser tests cover inline and nested forks, historical selections from an inactive conversation, formatted Chinese/emoji/formula anchors, draft preservation, return-position restoration across reload, new conversations retaining history, literal slash input, terminal reconnection, light/dark themes, and narrow layouts. Regular tests cover session persistence, collapse state, duplicate forks, stale selections, provider limits, authenticated local requests, and PTY input/output.
 
 ## What it looks like
 
@@ -219,6 +280,10 @@ threadline --no-color           # disable ANSI color
 Line mode exposes `/segments`, `/dive N question`, `/activities`, `/activity N`, `/threads`, `/open N`, `/back`, and `/quit`. Run `/help` in that mode for the current list.
 
 ## Slash commands
+
+In `--terminal` and the native terminal pane of `--native`, Codex owns all slash commands, including new or custom commands unknown to Threadline. Text and completion keys go directly to the native CLI, with no Threadline command allowlist. Use that terminal pane rather than the reading view's message form for slash menus. Provider authentication, external applications, and terminal-specific features still depend on your installed CLI and host environment.
+
+The following command table applies only to the original structured TUI and line modes, not to the native terminal modes:
 
 Typing `/` in the full-screen composer opens a filtered local command menu. Threadline dispatches supported commands through its controller or provider adapter; slash text is not silently turned into a model prompt.
 

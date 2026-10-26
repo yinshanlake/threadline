@@ -23,6 +23,7 @@ test("CLI documents configurable thread limits", async () => {
   assert.match(stdout, /resume SESSION_GUID/);
   assert.match(stdout, /threadline demo/);
   assert.match(stdout, /--native/);
+  assert.match(stdout, /--terminal/);
   assert.match(stdout, /--port N/);
 });
 
@@ -68,6 +69,12 @@ test("CLI rejects conflicting provider modes before starting a provider", async 
 
 test("native mode rejects unsupported providers and conflicting modes", async () => {
   for (const args of [["--native", "--claude"], ["--native", "--line"], ["--port", "4318"], ["--native", "--port", "70000"]]) {
+    await assert.rejects(execFileAsync(process.execPath, [cli, ...args], { cwd: project }), (error) => error.code === 1);
+  }
+});
+
+test("terminal panel mode rejects invalid combinations and requires interactive input", async () => {
+  for (const args of [["--terminal", "--native"], ["--terminal", "--claude"], ["--terminal", "--line"], ["--terminal", "--snapshot"], ["--terminal"]]) {
     await assert.rejects(execFileAsync(process.execPath, [cli, ...args], { cwd: project }), (error) => error.code === 1);
   }
 });

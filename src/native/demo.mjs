@@ -4,20 +4,25 @@ import { createConversation, rootScope } from "../model.mjs";
 import { importNativeThread } from "./workspace.mjs";
 
 export function nativeDemo() {
-  const conversation = createConversation({ title: "Native sidebar demo" });
+  const conversation = createConversation({ title: "Expandable conversation demo" });
   const scope = rootScope(conversation);
   scope.providerThreadId = randomUUID();
   const thread = {
     id: scope.providerThreadId, name: "Main conversation", turns: [{
       id: randomUUID(), status: "completed", items: [
         { type: "userMessage", content: [{ type: "text", text: "How should Threadline work alongside Codex?" }] },
-        { type: "agentMessage", id: randomUUID(), text: "Keep the native CLI responsible for the conversation. Its slash commands, completion, and approvals run in the terminal.\n\nUse the sidebar to select an exact passage and open a separate conversation. The branch inherits the history up to this answer. You can return to the parent without losing the branch.\n\n中文、emoji 🌱 and terminal resizing do not change the source offsets stored by Threadline." },
+        { type: "agentMessage", id: randomUUID(), text: "Keep the native CLI responsible for execution. Its slash commands, completion, and approvals run in the terminal, which you can hide while reading.\n\nSelect an exact passage and open a separate conversation. The follow-up appears under its source; the parent and earlier replies stay visible. Expand a question to read its history, or return to the parent to continue from the same reading position.\n\n中文、emoji 🌱 and terminal resizing do not change the source offsets stored by Threadline." },
       ],
     }],
   };
   importNativeThread(scope, thread);
   const threads = new Map([[thread.id, thread]]);
   const sessions = {
+    async create() {
+      const thread = { id: randomUUID(), name: "New conversation", turns: [] };
+      threads.set(thread.id, thread);
+      return structuredClone(thread);
+    },
     async read(id) {
       if (!threads.has(id)) throw new Error("Unknown demo conversation.");
       return structuredClone(threads.get(id));

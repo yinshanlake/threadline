@@ -75,7 +75,7 @@ function anchoredGroups(conversation, scopeId, messageId, start, end) {
   return [...groups.values()];
 }
 
-function renderMessage(lines, selectables, conversation, scope, turn, message, width, { inlineIndent = null, granularity = "block", activityPages = null, activityGroups = null, accent = null } = {}) {
+function renderMessage(lines, selectables, conversation, scope, turn, message, width, { inlineIndent = null, granularity = "block", activityPages = null, activityGroups = null, accent = null, sourceMap = false, hierarchy = false, newTurns = null } = {}) {
   const allSegments = segmentsForTurn(turn);
   const blocks = contentBlocks(message.text);
   const baseIndent = inlineIndent === null ? assistantRail : `${inlineIndent}  │ `;
@@ -96,16 +96,16 @@ function renderMessage(lines, selectables, conversation, scope, turn, message, w
     }
     const prefix = block.type === "code" ? codeIndent : baseIndent;
     const usable = Math.max(1, width - displayWidth(prefix));
-    const annotated = wrapAnnotatedText(block.text, usable, { sourceStart: globalStart, ranges, type: block.type });
+    const annotated = wrapAnnotatedText(block.text, usable, { sourceStart: globalStart, ranges, type: block.type, sourceMap });
     annotated.forEach((line) => {
       const parts = [{ text: prefix, tone: block.type === "code" ? "codeBorder" : "dim", accent }];
       const bodyTone = turn.assistant.status === "failed" ? "error" : message.phase === "commentary" ? "commentary" : block.type;
-      for (const part of line.parts) parts.push({ text: part.text, tone: turn.assistant.status === "failed" ? "error" : part.tone || bodyTone, selectableIndex: part.selectableIndex });
-      addLine(lines, parts, { selectableIndices: [...new Set(line.parts.map((part) => part.selectableIndex).filter((value) => value !== undefined))] });
+      for (const part of line.parts) parts.push({ ...part, tone: turn.assistant.status === "failed" ? "error" : part.tone || bodyTone });
+      addLine(lines, parts, { selectableIndices: [...new Set(line.parts.map((part) => part.selectableIndex).filter((value) => value !== undefined))], ...(sourceMap ? { scopeId: scope.id, turnId: turn.id } : {}) });
     });
 
     for (const branches of anchoredGroups(conversation, scope.id, turn.assistant.id, globalStart, globalEnd)) {
-      renderInlineBranches(lines, selectables, conversation, branches, width, baseIndent, granularity, activityPages, activityGroups);
+      renderInlineBranches(lines, selectables, conversation, branches, width, baseIndent, granularity, activityPages, activityGroups, sourceMap, hierarchy, newTurns);
     }
     if (blockPosition < blocks.length - 1) addLine(lines, inlineIndent === null ? assistantRailBlank : `${inlineIndent}  │`, { tone: "rail", accent });
   });
@@ -116,12 +116,15 @@ function branchSummary(branches) {
   return `${branches.length} ${branches.length === 1 ? "thread" : "threads"}  ${replies} ${replies === 1 ? "reply" : "replies"}`;
 }
 
-function renderInlineBranches(lines, selectables, conversation, branches, width, indent, granularity, activityPages, activityGroups) {
+function renderInlineBranches(lines, selectables, conversation, branches, width, indent, granularity, activityPages, activityGroups, sourceMap = false, hierarchy = false, newTurns = null) {
   const collapsed = branches.every((branch) => branch.collapsed);
   const groupIndex = selectables.length;
   selectables.push({ kind: "branch-group", scopeIds: branches.map((branch) => branch.id), parentScopeId: branches[0].parentId, anchor: branches[0].anchor });
   const groupAccent = branches.length === 1 ? threadColorIndex(conversation, branches[0].id) : null;
-  addWrapped(lines, `${collapsed ? "▸" : "▾"} ${branchSummary(branches)}`, width, { prefix: indent, continuation: `${indent}  `, prefixAccent: groupAccent, tone: "thread", accent: groupAccent, selectableIndex: groupIndex });
+  const branchQuestion = branches[0].native?.question || branches[0].turns[0]?.user.text || "追问";
+  const preview = truncate(terminalPlainText(branchQuestion).replace(/\s+/gu, " "), Math.max(8, width - displayWidth(indent) - 28));
+  const label = hierarchy ? `${branches.length === 1 ? "追问：" + preview : branches.length + " 个追问"} · ${turnCount(branches)} 条回复` : branchSummary(branches);
+  addWrapped(lines, `${collapsed ? "▸" : "▾"} ${label}`, width, { prefix: indent, continuation: `${indent}  `, prefixAccent: groupAccent, tone: "thread", accent: groupAccent, selectableIndex: groupIndex });
   if (collapsed) return;
 
   branches.forEach((branch, branchPosition) => {
@@ -129,12 +132,23 @@ function renderInlineBranches(lines, selectables, conversation, branches, width,
     if (branchPosition > 0) addLine(lines, indent.trimEnd(), { tone: "rail", accent });
     const branchIndex = selectables.length;
     selectables.push({ kind: "branch", scopeId: branch.id });
+    if (hierarchy) {
+      const active = branch.id === conversation.activeScopeId;
+      addWrapped(lines, `${branch.collapsed ? "▸" : "▾"} 追问${active ? "  [当前输入]" : ""}`, width, { prefix: `${indent}  ┌ `, continuation: `${indent}    `, tone: "questionRole", accent, selectableIndex: branchIndex });
+      addWrapped(lines, branch.native?.question || branch.turns[0]?.user.text || "追问", width, { prefix: `${indent}  │ 你：`, continuation: `${indent}  │     `, tone: "user", accent, selectableIndex: branchIndex });
+      if (branch.collapsed) return;
+      const quote = truncate(terminalPlainText(branch.anchor?.exactQuote || "").replace(/\s+/gu, " "), Math.max(8, width - displayWidth(indent) - 16));
+      addWrapped(lines, "原文引用：" + quote, width, { prefix: `${indent}  │ `, continuation: `${indent}  │ `, tone: "sourceQuote" });
+    }
     if (!branch.turns.length) {
-      addWrapped(lines, "Open empty thread", width, { prefix: `${indent}  › `, continuation: `${indent}    `, prefixAccent: accent, tone: "user", accent, selectableIndex: branchIndex });
+      addWrapped(lines, hierarchy ? "Codex 正在准备回复…" : "Open empty thread", width, { prefix: `${indent}  │ `, continuation: `${indent}    `, prefixAccent: accent, tone: hierarchy ? "hint" : "user", accent, selectableIndex: hierarchy ? undefined : branchIndex });
       return;
     }
     for (const turn of branch.turns) {
-      addWrapped(lines, turn.user.text, width, { prefix: `${indent}  › `, continuation: `${indent}    `, prefixAccent: accent, tone: "user", accent, selectableIndex: branchIndex });
+      if (!hierarchy || turn !== branch.turns[0]) addWrapped(lines, turn.user.text, width, { prefix: `${indent}  ${hierarchy ? "你：" : "› "}`, continuation: `${indent}    `, prefixAccent: accent, tone: "user", accent, selectableIndex: branchIndex });
+      if (hierarchy) {
+        addWrapped(lines, "Codex · 追问回答" + (newTurns?.has(turn.id) ? "  [新]" : ""), width, { prefix: `${indent}  │ `, tone: newTurns?.has(turn.id) ? "newAnswer" : "answerRole" });
+      }
       const timeline = groupedTimeline(timelineFor(turn));
       if (turn.assistant.legacyTimeline) addLine(lines, [{ text: `${indent}  │ migrated session: original tool and message order was not recorded`, tone: "warning" }]);
       if (!timeline.length && turn.assistant.status === "streaming") {
@@ -142,7 +156,7 @@ function renderInlineBranches(lines, selectables, conversation, branches, width,
       }
       for (const [entryIndex, entry] of timeline.entries()) {
         if (entry.kind === "message") {
-          renderMessage(lines, selectables, conversation, branch, turn, entry.value, width, { inlineIndent: indent, granularity, activityPages, activityGroups, accent });
+          renderMessage(lines, selectables, conversation, branch, turn, entry.value, width, { inlineIndent: indent, granularity, activityPages, activityGroups, accent, sourceMap, hierarchy, newTurns });
         } else if (entry.kind === "activity-run") {
           renderActivityGroup(lines, selectables, branch, turn, entry.entries, width, activityPages, activityGroups, accent, `${indent}  │ `);
         } else {
@@ -151,6 +165,7 @@ function renderInlineBranches(lines, selectables, conversation, branches, width,
         if (entryIndex < timeline.length - 1) addLine(lines, `${indent}  │`, { tone: "rail", accent });
       }
     }
+    if (hierarchy) addLine(lines, `${indent}  └`, { tone: "rail", accent });
   });
 }
 
@@ -301,19 +316,35 @@ function timelineFor(turn) {
   ];
 }
 
-export function buildConversationView(conversation, { width = 80, scopeId = conversation.activeScopeId, granularity = "block", activityPages = null, activityGroups = null } = {}) {
+export function buildConversationView(conversation, { width = 80, scopeId = conversation.activeScopeId, granularity = "block", activityPages = null, activityGroups = null, sourceMap = false, hierarchy = false, newTurns = null } = {}) {
   const lines = [];
   const selectables = [];
   const scope = findScope(conversation, scopeId);
   if (!scope) return { lines: [makeLine("Conversation scope not found", { tone: "error" })], selectables };
   const scopeAccent = scope.parentId ? threadColorIndex(conversation, scope.id) : null;
+  if (hierarchy) {
+    const index = selectables.length;
+    selectables.push({ kind: "scope", scopeId: scope.id });
+    const title = terminalPlainText(scope.native?.title || scope.turns[0]?.user.text || "新对话").replace(/\s+/gu, " ");
+    const active = scope.id === conversation.activeScopeId;
+    addWrapped(lines, `${scope.collapsed ? "▸" : "▾"} 主对话${active ? "  [当前输入]" : ""}  ${title}`, width, { prefix: " ", continuation: "   ", tone: "scopeRole", selectableIndex: index, singleLine: true });
+    addLine(lines, " " + "─".repeat(Math.max(0, width - 2)), { tone: "rail" });
+    if (scope.collapsed) return { lines, selectables };
+  }
   if (!scope.turns.length) {
     addLine(lines, "");
-    addLine(lines, [{ text: "  Ask a question. Press Up on a completed answer to explore it.", tone: "empty" }]);
+    addLine(lines, [{ text: hierarchy ? "  在下方输入问题。Ctrl+B 浏览对话；方向键选择，Enter 追问。" : "  Ask a question. Press Up on a completed answer to explore it.", tone: "empty" }]);
   }
 
   for (const turn of scope.turns) {
-    addWrapped(lines, turn.user.text, width, { prefix: "  › ", continuation: "    ", prefixAccent: scopeAccent, tone: "user", accent: scopeAccent });
+    if (hierarchy) {
+      const index = selectables.length;
+      selectables.push({ kind: "turn", scopeId: scope.id, turnId: turn.id });
+      addWrapped(lines, `${turn.collapsed ? "▸" : "▾"} 你 · 主问题：${turn.user.text}`, width, { prefix: "  ", continuation: "    ", tone: "questionRole", selectableIndex: index });
+      if (turn.collapsed) { addLine(lines, ""); continue; }
+      addLine(lines, "");
+      addWrapped(lines, "Codex · 主回答" + (newTurns?.has(turn.id) ? "  [新]" : ""), width, { prefix: assistantRail, tone: newTurns?.has(turn.id) ? "newAnswer" : "answerRole" });
+    } else addWrapped(lines, turn.user.text, width, { prefix: "  › ", continuation: "    ", prefixAccent: scopeAccent, tone: "user", accent: scopeAccent });
     addLine(lines, "");
 
     const timeline = groupedTimeline(timelineFor(turn));
@@ -324,7 +355,7 @@ export function buildConversationView(conversation, { width = 80, scopeId = conv
     for (const [entryIndex, entry] of timeline.entries()) {
       if (entry.kind === "message") {
         const commentary = entry.value.phase === "commentary";
-        renderMessage(lines, selectables, conversation, scope, turn, entry.value, width, { granularity, activityPages, activityGroups, accent: scopeAccent });
+        renderMessage(lines, selectables, conversation, scope, turn, entry.value, width, { granularity, activityPages, activityGroups, accent: scopeAccent, sourceMap, hierarchy, newTurns });
       } else if (entry.kind === "activity-run") {
         renderActivityGroup(lines, selectables, scope, turn, entry.entries, width, activityPages, activityGroups, scopeAccent);
       } else {
@@ -382,6 +413,10 @@ export function applyTone(text, tone, selected = false, colors = true, accent = 
     const accentColor = Number.isInteger(accent) ? ansi.threadColors[accent % ansi.threadColors.length] : "";
     if (accentColor) prefix += accentColor;
     if (tone === "user") prefix += ansi.bold;
+    if (["scopeRole", "questionRole"].includes(tone)) prefix += ansi.bold + (tone === "questionRole" ? "\x1b[38;5;117m" : "");
+    if (tone === "sourceQuote") prefix += ansi.dim + ansi.italic;
+    if (tone === "answerRole") prefix += "\x1b[38;5;114m";
+    if (tone === "newAnswer") prefix += ansi.bold + "\x1b[38;5;114m";
     if (tone === "heading") prefix += ansi.bold;
     if (tone === "strong") prefix += ansi.bold;
     if (tone === "emphasis") prefix += ansi.italic;

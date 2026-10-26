@@ -10,7 +10,7 @@ import { createConversation, rootScope } from "../src/model.mjs";
 import { loadConversation, SessionWriter } from "../src/store.mjs";
 import { startNativeServer } from "../src/native/server.mjs";
 import { NativeTerminal, nativeArgs } from "../src/native/terminal.mjs";
-import { nativeEnvironment } from "../src/native/codex.mjs";
+import { nativeEnvironment, nativeCommandCapabilities } from "../src/native/codex.mjs";
 import { importNativeThread, NativeWorkspace } from "../src/native/workspace.mjs";
 
 class FakeTerminal extends EventEmitter {
@@ -18,6 +18,7 @@ class FakeTerminal extends EventEmitter {
   write(data) { this.writes.push(data); }
   resize(cols, rows) { this.size = { cols, rows }; }
   async snapshot() { return { data: "parent screen", sequence: 0, cols: 100, rows: 30 }; }
+  async submit(text) { this.write(text + "\r"); }
   close() { this.exited = true; }
 }
 
@@ -113,6 +114,106 @@ test("child history omits inherited turns and nested forks use the child turn", 
   } finally { await workspace.close(); }
 });
 
+test("collapse persists in native state and opening a descendant restores its path", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadline-inline-"));
+  const { workspace, root, passage } = fixture();
+  const file = path.join(directory, "session.json");
+  workspace.writer = new SessionWriter(file, () => workspace.conversation);
+  try {
+    const child = await workspace.branch(passage());
+    await workspace.collapse({ scopeId: child.id, collapsed: true });
+    await workspace.collapse({ scopeId: root.id, collapsed: true });
+    await workspace.writer.flush();
+    const saved = await loadConversation(file);
+    assert.equal(saved.scopes.find((scope) => scope.id === child.id).collapsed, true);
+    assert.equal(workspace.state().scopes.find((scope) => scope.id === root.id).collapsed, true);
+    await workspace.activate(child.id);
+    assert.equal(root.collapsed, false);
+    assert.equal(child.collapsed, false);
+    await workspace.back();
+    assert.equal(child.collapsed, true);
+    assert.equal(workspace.scope().id, root.id);
+    await assert.rejects(workspace.collapse({ scopeId: root.id, collapsed: "true" }), /explicit/u);
+    await assert.rejects(workspace.collapse({ scopeId: "missing", collapsed: true }), /no longer/u);
+  } finally { await workspace.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("new conversations retain the entire previous tree without forking its model history", async () => {
+  const { workspace, root, passage, forks } = fixture();
+  try {
+    await workspace.initialize();
+    const parentTerminal = workspace.terminalFor(root.id);
+    const child = await workspace.branch(passage());
+    const original = structuredClone(root.turns);
+    const fresh = await workspace.newConversation();
+    assert.equal(workspace.scope().id, fresh.id);
+    assert.equal(fresh.parentId, null);
+    assert.equal(fresh.providerThreadId, null);
+    assert.equal(fresh.turns.length, 0);
+    assert.equal(workspace.state().scopes.length, 3);
+    assert.deepEqual(root.turns, original);
+    assert.equal(workspace.terminalFor(root.id), parentTerminal);
+    assert.equal(workspace.scope(child.id).parentId, root.id);
+    assert.equal(forks.length, 1);
+    assert.equal(workspace.terminalFor(fresh.id).terminal.options.args.includes("resume"), false);
+  } finally { await workspace.close(); }
+});
+
+test("unnamed native conversations get a stable title from their first question", async () => {
+  const { workspace, root, thread } = fixture();
+  try {
+    root.native.title = "New conversation";
+    importNativeThread(root, thread);
+    assert.equal(root.native.title, "parent question");
+    thread.turns[0].items[0].content[0].text = "updated input";
+    importNativeThread(root, thread);
+    assert.equal(root.native.title, "parent question");
+    importNativeThread(root, { ...thread, name: "User title" });
+    assert.equal(root.native.title, "User title");
+  } finally { await workspace.close(); }
+});
+
+test("a new conversation's first message starts native Codex with a literal startup prompt", async () => {
+  const { workspace, root } = fixture();
+  try {
+    const fresh = await workspace.newConversation();
+    const idle = workspace.terminalFor(fresh.id);
+    const prompt = '第一行。\nSecond line: $HOME $(example) "quoted"';
+    await workspace.sendMessage({ scopeId: fresh.id, text: prompt });
+    assert.equal(idle.terminal.exited, true);
+    assert.notEqual(workspace.terminalFor(fresh.id).id, idle.id);
+    assert.equal(workspace.terminalFor(fresh.id).terminal.options.args.at(-1), prompt);
+    assert.equal(fresh.native.pendingPrompt, prompt);
+    assert.equal(fresh.native.submission.text, prompt);
+    assert.equal(workspace.state().scopes.find((scope) => scope.id === fresh.id).pendingSubmission, true);
+    assert.equal(root.turns.length, 1);
+    await assert.rejects(workspace.sendMessage({ scopeId: fresh.id, text: "duplicate" }), /still running/u);
+  } finally { await workspace.close(); }
+});
+
+test("page messages append to their own native session and complete only when a new turn arrives", async () => {
+  const { workspace, root, threads } = fixture();
+  try {
+    await workspace.initialize();
+    const terminal = workspace.terminalFor(root.id).terminal;
+    await workspace.sendMessage({ scopeId: root.id, text: "继续同一对话。" });
+    assert.equal(terminal.writes.at(-1), "继续同一对话。\r");
+    await workspace.sync(root.id);
+    assert.ok(root.native.submission); // An old read must not unlock a pending turn.
+    threads.get(root.providerThreadId).turns.push({ id: randomUUID(), status: "completed", items: [
+      { type: "userMessage", content: [{ type: "text", text: "继续同一对话。" }] },
+      { type: "agentMessage", id: "continued-answer", text: "继续成功。" },
+    ] });
+    await workspace.sync(root.id);
+    assert.equal(root.native.submission, undefined);
+    assert.equal(root.turns.length, 2);
+    for (const text of ["", " ", "/new", "contains\x1b[2J", "x".repeat(16001)]) {
+      await assert.rejects(workspace.sendMessage({ scopeId: root.id, text }));
+    }
+    assert.equal(terminal.writes.length, 1);
+  } finally { await workspace.close(); }
+});
+
 test("transient notification IDs never replace a persisted conversation", async () => {
   const { workspace, root } = fixture();
   try {
@@ -159,10 +260,20 @@ test("a failed terminal launch leaves one persisted fork and a retryable prompt"
 
 test("native arguments keep the prompt literal and never opt into full access implicitly", () => {
   const prompt = 'why $HOME $(example) "quoted"?';
-  const args = nativeArgs({ command: { file: "node", args: ["codex.js"] }, cwd: "space dir", threadId: "session", prompt });
+  const args = nativeArgs({ command: { file: "node", args: ["codex.js"], supportsNoDaemon: true }, cwd: "space dir", threadId: "session", prompt });
   assert.equal(args.at(-1), prompt);
   assert.equal(args.includes("danger-full-access"), false);
   assert.equal(args.includes("never"), false);
+  assert.equal(args.includes("--no-daemon"), true);
+});
+
+test("native CLI capability detection keeps older Codex versions launchable", () => {
+  const command = { file: "node", args: ["codex.js"] };
+  const older = nativeCommandCapabilities(command, () => "Usage: codex [OPTIONS] [PROMPT]");
+  const current = nativeCommandCapabilities(command, () => "Options:\n  --no-daemon  Run without the shared server\n");
+  assert.equal(nativeArgs({ command: older, cwd: "workspace" }).includes("--no-daemon"), false);
+  assert.equal(nativeArgs({ command: current, cwd: "workspace" }).includes("--no-daemon"), true);
+  assert.equal(command.supportsNoDaemon, undefined);
 });
 
 test("native children do not inherit the hosting agent's session or shutdown controls", () => {
@@ -244,4 +355,39 @@ test("a real PTY carries input, resizes, and retains output for reconnection", {
     }
     terminal.close();
   }
+});
+
+test("Windows PTYs survive concurrent exits and isolated helper failure", { skip: process.platform !== "win32", timeout: 25000 }, async () => {
+  const terminals = [];
+  try {
+    for (let round = 0; round < 3; round++) {
+      const batch = Array.from({ length: 5 }, () => new NativeTerminal({
+        command: { file: process.execPath },
+        args: ["-e", "console.log('ready');process.stdin.resume();process.stdin.on('data',()=>process.exit(0));"],
+        cwd: process.cwd(),
+      }));
+      terminals.push(...batch);
+      await Promise.all(batch.map(async (terminal) => {
+        let output = "";
+        terminal.on("data", ({ data }) => { output += data; });
+        const deadline = Date.now() + 6000;
+        while (!output.includes("ready") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.ok(output.includes("ready"), "The isolated PTY should start.");
+      }));
+      const helpers = new Set(batch.map((terminal) => terminal.process.helper.pid));
+      assert.equal(helpers.size, 5);
+      await Promise.all(batch.map((terminal) => terminal.stop({ input: "quit\r" })));
+      assert.ok(batch.every((terminal) => terminal.exited));
+    }
+    const first = new NativeTerminal({ command: { file: process.execPath }, args: ["-e", "console.log('ready');process.stdin.resume();"], cwd: process.cwd() });
+    const second = new NativeTerminal({ command: { file: process.execPath }, args: ["-e", "console.log('ready');process.stdin.resume();"], cwd: process.cwd() });
+    terminals.push(first, second);
+    const failed = once(first, "exit");
+    first.process.helper.kill();
+    const [event] = await failed;
+    assert.notEqual(event.exitCode, 0);
+    assert.equal(second.exited, false);
+    second.write("\x03");
+    await second.stop();
+  } finally { await Promise.all(terminals.map((terminal) => terminal.stop())); }
 });

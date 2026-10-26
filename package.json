@@ -23,6 +23,7 @@
   "files": [
     "src/",
     "README.md",
+    "scripts/patch-unicode-trie.mjs",
     "LICENSE"
   ],
   "bin": {
@@ -33,16 +34,20 @@
     "demo": "node ./src/cli.mjs demo",
     "native": "node ./src/cli.mjs --native",
     "native:demo": "node ./src/cli.mjs demo --native",
+    "terminal": "node ./src/cli.mjs --terminal",
+    "terminal:demo": "node ./src/cli.mjs demo --terminal",
     "snapshot": "node ./src/cli.mjs demo --snapshot",
     "probe": "node ./src/cli.mjs --probe",
     "test": "node --test",
     "test:native-browser": "node ./scripts/run-native-browser.mjs",
+    "postinstall": "node ./scripts/patch-unicode-trie.mjs",
     "prepack": "npm test"
   },
   "dependencies": {
     "@openai/codex": "^0.144.5",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/addon-unicode-graphemes": "0.4.0",
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",

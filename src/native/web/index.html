@@ -10,33 +10,45 @@
 </head>
 <body>
   <header class="toolbar">
-    <div class="brand">Threadline <span>Codex</span></div>
+    <div class="brand">Threadline <span id="runtime-mode">Codex</span></div>
     <div id="workspace-path" class="workspace-path"></div>
-    <button id="toggle-panel" aria-controls="sidebar" aria-expanded="true">Branches <kbd>Ctrl+Shift+B</kbd></button>
+    <button id="new-conversation">New conversation</button>
+    <button id="toggle-panel" aria-controls="sidebar" aria-expanded="true">Conversation <kbd>Ctrl+Shift+B</kbd></button>
+    <button id="toggle-terminal" aria-controls="terminal-pane" aria-expanded="true">Terminal <kbd>Ctrl+Shift+`</kbd></button>
   </header>
   <main id="layout" class="layout">
-    <section class="terminal-pane" aria-label="Codex terminal">
+    <section id="terminal-pane" class="terminal-pane" aria-label="Codex terminal">
       <div class="terminal-toolbar">
         <span id="active-title">Main conversation</span>
         <span id="connection" role="status">Connecting</span>
       </div>
       <div id="terminal"></div>
-      <div class="terminal-footer">Use Codex normally. Select a passage in the panel to explore it.</div>
+      <div class="terminal-footer">Native Codex handles input, tools and approvals here.</div>
     </section>
     <aside id="sidebar" class="sidebar" aria-label="Conversation branches">
       <div class="panel-toolbar">
-        <h1>Branches</h1>
+        <div class="panel-heading"><h1>Conversation</h1><p>Select any passage to ask a question.</p></div>
         <button id="back" disabled>Return to parent</button>
       </div>
-      <nav id="tree" aria-label="Branch tree"></nav>
-      <div class="answer-toolbar"><h2>Answers</h2><button id="refresh">Refresh</button></div>
-      <div id="source-anchor" hidden></div>
-      <div id="answers" class="answers"><p class="empty">Completed answers appear here. Select any passage to start a follow-up.</p></div>
-      <form id="follow-up" hidden>
-        <div class="selection-heading"><label for="question">Follow-up on this passage</label><button id="cancel-selection" type="button" aria-label="Clear selection">Clear</button></div>
-        <blockquote id="selected-quote"></blockquote>
-        <textarea id="question" rows="3" maxlength="16000" placeholder="What would you like to explore?" required></textarea>
-        <button id="ask" class="primary" type="submit">Open branch</button>
+      <div class="navigation-row">
+        <details id="history-menu"><summary>Past conversations</summary><nav id="tree" aria-label="Branch tree"></nav></details>
+        <button id="refresh">Refresh</button>
+      </div>
+      <nav id="breadcrumb" aria-label="Current conversation"></nav>
+      <div id="answers" class="answers" tabindex="-1"><div id="transcript"></div><p id="transcript-empty" class="empty" hidden>Open the terminal to start a conversation. Completed replies appear here.</p></div>
+      <div id="selection-home">
+        <form id="follow-up" hidden>
+          <div class="selection-heading"><label for="question">Follow-up on this passage</label><button id="cancel-selection" type="button" aria-label="Clear selection">Clear</button></div>
+          <blockquote id="selected-quote"></blockquote>
+          <textarea id="question" rows="3" maxlength="16000" placeholder="What would you like to explore?" required></textarea>
+          <div class="selection-actions"><span>Ctrl+Enter to send</span><button id="ask" class="primary" type="submit">Open branch</button></div>
+        </form>
+      </div>
+      <div id="continue-bar"><span id="continue-label">Continue the current conversation</span><button id="continue-conversation">Continue in terminal</button></div>
+      <form id="composer">
+        <label id="composer-label" for="prompt">Message</label>
+        <textarea id="prompt" rows="2" maxlength="16000" placeholder="Ask a question or continue the conversation" required></textarea>
+        <div class="composer-actions"><span id="composer-status">Ctrl+Enter to send</span><button id="send" class="primary" type="submit">Send</button></div>
       </form>
       <p id="message" role="status" hidden></p>
     </aside>
