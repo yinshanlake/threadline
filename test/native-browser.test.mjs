@@ -75,6 +75,8 @@ async function fixture({ answer } = {}) {
 // The mouse path uses actual grid coordinates, not a DOM Range or a fake pane.
 async function nativeSelect(page, text, { mouse = false, occurrence = 0 } = {}) {
   await page.evaluate(async () => { window.nativeTerminalUnderTest = (await import("/app.js")).terminal; });
+  // Select only after the ResizeObserver, PTY fit and renderer have run.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.waitForFunction(({ text, occurrence }) => {
     const terminal = window.nativeTerminalUnderTest;
     const buffer = terminal.buffer.active;
@@ -350,6 +352,18 @@ test("native session rebinding follows terminalId without caching the original r
     assert.equal(child.parentId, rebound.id);
     assert.equal(f.workspace.terminalFor(rebound.id), native);
     assert.equal(f.connections.length, 1);
+    await askNative(page, "中文、emoji 🌱");
+    await page.locator("#question").fill("Keep this draft when a resume conflicts.");
+    const conflict = await fetch(f.app.origin + "/api/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Threadline-Notify": f.workspace.notify.token },
+      body: JSON.stringify({ terminalId: native.id, threadId: child.providerThreadId }),
+    });
+    assert.equal(conflict.status, 400);
+    await page.waitForFunction(() => document.querySelector("#ask").disabled);
+    assert.match(await page.locator("#active-title").innerText(), /history unavailable/u);
+    assert.equal(await page.locator("#question").inputValue(), "Keep this draft when a resume conflicts.");
+    assert.equal(f.workspace.conversation.scopes.length, 3);
     assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
 });

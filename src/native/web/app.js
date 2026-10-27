@@ -106,7 +106,8 @@ function validSelection(value) {
   const native = value.origin && state.scopes.find((item) => item.terminalId === value.origin.terminalId);
   return !value.invalidReason && scope?.threadId === value.sourceThreadId && turn?.providerTurnId === value.providerTurnId &&
     turn?.assistant.status === "complete" && turn.assistant.text.slice(value.start, value.end) === value.quote &&
-    (!value.origin || (native?.id === value.origin.scopeId && native?.threadId === value.origin.threadId));
+    (!value.origin || (native?.id === value.origin.scopeId && native?.threadId === value.origin.threadId &&
+      native?.terminalThreadId === value.origin.threadId));
 }
 function allParts() { return [...$("transcript").querySelectorAll(".answer-text")]; }
 function partFor(scopeId, turnId, offset) {
@@ -495,7 +496,9 @@ function render(next, { force = false } = {}) {
   if (!mainTerminalId) mainTerminalId = currentScope(mainScopeId)?.terminalId;
   $("workspace-path").textContent = state.cwd;
   $("runtime-mode").textContent = state.demo ? "Offline demo" : "Live Codex";
-  $("active-title").textContent = `${native?.parentId ? "Branch" : "Main"} · ${native?.title || "Native terminal"}`;
+  $("active-title").textContent = native?.terminalThreadId !== native?.threadId
+    ? "Native session changed · history unavailable"
+    : `${native?.parentId ? "Branch" : "Main"} · ${native?.title || "Native terminal"}`;
   $("terminal-pane").dataset.scope = native?.id || "";
   $("terminal-pane").dataset.thread = native?.threadId || "";
   $("terminal-pane").dataset.terminal = native?.terminalId || terminalId || "";
@@ -742,6 +745,9 @@ async function askNativeSelection(capture = captureNativeSelection()) {
   let frozen;
   try {
     if (!nativeCaptureCurrent(capture)) throw new Error("The terminal selection changed. Select the passage again.");
+    if (displayedScope()?.terminalThreadId !== capture.threadId) {
+      throw new Error(state.notice || "The native session changed before its history could be linked. Reopen its source terminal before asking.");
+    }
     frozen = {
       ...resolveNativeSelection(state.scopes, capture.scopeId, capture.text, { context: capture.context }),
       origin: { terminalId: capture.terminalId, scopeId: capture.scopeId, threadId: capture.threadId },

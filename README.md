@@ -98,6 +98,8 @@ threadline --native --port 4318
 
 Forks isolate conversation history. The native agents still share the chosen working directory, so edits in one branch are visible to the others. Codex's app-server and session protocol remain experimental; errors are shown in the sidebar rather than repaired by rewriting transcript files.
 
+If a native resume targets a session already running in another terminal, Threadline reports the conflict and disables selections from the unresolved binding rather than treating the old session as its source. Close the duplicate native terminal and complete a turn in the resumed terminal to link its history again. Existing question drafts are retained.
+
 On Windows, each native terminal runs in its own hidden PTY helper process. This isolates node-pty's native handle state across branches and contains a terminal failure without closing the browser workspace. Closing Threadline first requests graceful terminal exit, then cleans up its own helpers.
 
 Try the complete flow without a model connection:

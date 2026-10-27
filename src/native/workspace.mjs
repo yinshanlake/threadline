@@ -105,6 +105,7 @@ export class NativeWorkspace extends EventEmitter {
           id: scope.id, parentId: scope.parentId, threadId: scope.providerThreadId, anchor: scope.anchor,
           title: scope.native?.question || scope.native?.title || (scope.parentId ? "Follow-up" : "Main conversation"),
           turns: scope.turns, terminalId: entry?.id ?? null, pendingPrompt: Boolean(scope.native?.pendingPrompt),
+          terminalThreadId: entry?.observedThreadId ?? scope.providerThreadId,
           inheritedTurnIds: scope.native?.inheritedTurnIds ?? [],
           activity: entry?.terminal.activityStatus?.() ?? null,
           collapsed: Boolean(scope.collapsed),
@@ -142,7 +143,7 @@ export class NativeWorkspace extends EventEmitter {
           .map(({ turn }) => ({ question: turn.user.text, answer: turn.assistant.text }))) : undefined,
       },
     });
-    const entry = { id, scopeId, terminal };
+    const entry = { id, scopeId, terminal, observedThreadId: scope.providerThreadId };
     this.terminals.set(id, entry);
     terminal.on("exit", ({ exitCode, error }) => {
       if (scope.native?.submission?.terminalId === id) {
@@ -195,6 +196,7 @@ export class NativeWorkspace extends EventEmitter {
         throw error;
       }
       if (thread.id !== threadId) throw new Error("Codex returned a different session than the notification.");
+      entry.observedThreadId = threadId;
       if (scope.providerThreadId && scope.providerThreadId !== threadId) {
         // /new, /resume and /fork remain native commands. Track the resulting
         // session without overwriting the original conversation's anchors.
@@ -223,7 +225,7 @@ export class NativeWorkspace extends EventEmitter {
   selectionTerminal(origin) {
     const entry = origin && this.terminals.get(origin.terminalId);
     if (!entry || entry.terminal.exited || entry.scopeId !== origin.scopeId ||
-        this.scope(entry.scopeId).providerThreadId !== origin.threadId) {
+        this.scope(entry.scopeId).providerThreadId !== origin.threadId || entry.observedThreadId !== origin.threadId) {
       throw new Error("The native source session changed. Select the passage again; your question has been kept.");
     }
     return entry;

@@ -148,6 +148,31 @@ test("inherited native selections retain source identity and cannot claim an unr
   } finally { await workspace.close(); }
 });
 
+test("a conflicting native resume invalidates old selection bindings until the observed session is linked", async () => {
+  const { workspace, root, passage, forks } = fixture();
+  try {
+    await workspace.initialize();
+    const main = workspace.terminalFor(root.id);
+    const input = { terminalId: main.id, scopeId: root.id, threadId: root.providerThreadId, text: "中文 🌱 stays anchored." };
+    const selected = await workspace.resolveSelection(input);
+    const child = await workspace.branch(passage());
+    const duplicate = workspace.terminalFor(child.id);
+    await assert.rejects(workspace.notification({ terminalId: main.id, threadId: child.providerThreadId }), /already open/u);
+    const source = workspace.state().scopes.find((scope) => scope.id === root.id);
+    assert.equal(source.threadId, root.providerThreadId);
+    assert.equal(source.terminalThreadId, child.providerThreadId);
+    await assert.rejects(workspace.resolveSelection(input), /native source session changed/u);
+    await assert.rejects(workspace.branch({ ...selected, question: "Do not guess this source" }), /native source session changed/u);
+    assert.equal(forks.length, 1);
+    duplicate.terminal.close();
+    await workspace.notification({ terminalId: main.id, threadId: child.providerThreadId });
+    const linked = await workspace.resolveSelection({ ...input, scopeId: child.id, threadId: child.providerThreadId });
+    assert.equal(linked.scopeId, root.id);
+    assert.equal(linked.origin.scopeId, child.id);
+    assert.equal(workspace.terminalFor(child.id), main);
+  } finally { await workspace.close(); }
+});
+
 test("concurrent identical follow-ups reuse one fork and respect limits", async () => {
   const { workspace, passage, forks } = fixture();
   try {
