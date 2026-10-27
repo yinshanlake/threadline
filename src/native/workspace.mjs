@@ -6,6 +6,7 @@ import {
 } from "../model.mjs";
 import { nativeArgs, NativeTerminal } from "./terminal.mjs";
 import { nativeEnvironment } from "./codex.mjs";
+import { nativeSelectionSources, resolveNativeSelection } from "./selection.mjs";
 
 function userText(items) {
   return items.filter((item) => item.type === "userMessage").flatMap((item) => item.content ?? [])
@@ -104,6 +105,8 @@ export class NativeWorkspace extends EventEmitter {
           id: scope.id, parentId: scope.parentId, threadId: scope.providerThreadId, anchor: scope.anchor,
           title: scope.native?.question || scope.native?.title || (scope.parentId ? "Follow-up" : "Main conversation"),
           turns: scope.turns, terminalId: entry?.id ?? null, pendingPrompt: Boolean(scope.native?.pendingPrompt),
+          inheritedTurnIds: scope.native?.inheritedTurnIds ?? [],
+          activity: entry?.terminal.activityStatus?.() ?? null,
           collapsed: Boolean(scope.collapsed),
           pendingSubmission: Boolean(scope.native?.submission), pendingText: scope.native?.submission?.text || null,
         };
@@ -135,6 +138,8 @@ export class NativeWorkspace extends EventEmitter {
       env: {
         ...nativeEnvironment(), THREADLINE_NOTIFY_URL: this.notify.url, THREADLINE_NOTIFY_TOKEN: this.notify.token,
         THREADLINE_TERMINAL_ID: id, THREADLINE_PREVIOUS_NOTIFY: JSON.stringify(this.previousNotify),
+        THREADLINE_DEMO_HISTORY: this.demo ? JSON.stringify(nativeSelectionSources(this.state().scopes, scope.id)
+          .map(({ turn }) => ({ question: turn.user.text, answer: turn.assistant.text }))) : undefined,
       },
     });
     const entry = { id, scopeId, terminal };
@@ -215,13 +220,43 @@ export class NativeWorkspace extends EventEmitter {
     });
   }
 
-  branch({ scopeId, turnId, start, end, quote, question }) {
+  selectionTerminal(origin) {
+    const entry = origin && this.terminals.get(origin.terminalId);
+    if (!entry || entry.terminal.exited || entry.scopeId !== origin.scopeId ||
+        this.scope(entry.scopeId).providerThreadId !== origin.threadId) {
+      throw new Error("The native source session changed. Select the passage again; your question has been kept.");
+    }
+    return entry;
+  }
+
+  resolveSelection({ terminalId, scopeId, threadId, text, context }) {
     return this.transaction(async () => {
+      const origin = { terminalId, scopeId, threadId };
+      this.selectionTerminal(origin);
+      await this.sync(scopeId);
+      this.selectionTerminal(origin);
+      return { ...resolveNativeSelection(this.state().scopes, scopeId, text, { context }), origin };
+    });
+  }
+
+  branch({ scopeId, turnId, start, end, quote, question, sourceThreadId, providerTurnId, origin }) {
+    return this.transaction(async () => {
+      if (origin) this.selectionTerminal(origin);
       const parent = this.scope(scopeId);
+      if (sourceThreadId !== undefined && parent.providerThreadId !== sourceThreadId) {
+        throw new Error("The selected source session changed. Select the passage again.");
+      }
       await this.sync(parent.id);
       const turn = parent.turns.find((candidate) => candidate.id === turnId);
       if (!turn || turn.assistant.status !== "complete" || !turn.providerTurnId || !parent.providerThreadId) {
         throw new Error("Select a passage from a completed answer.");
+      }
+      if (providerTurnId !== undefined && turn.providerTurnId !== providerTurnId) {
+        throw new Error("The selected source turn changed. Select the passage again.");
+      }
+      if (origin && !nativeSelectionSources(this.state().scopes, origin.scopeId)
+        .some((item) => item.scope.id === parent.id && item.turn.id === turn.id)) {
+        throw new Error("The selected answer does not belong to this native session.");
       }
       const text = turn.assistant.text;
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > text.length || text.slice(start, end) !== quote) {
@@ -229,6 +264,7 @@ export class NativeWorkspace extends EventEmitter {
       }
       const value = String(question ?? "").trim();
       if (!value || value.length > 16000) throw new Error("Enter a follow-up of at most 16,000 characters.");
+      if (value.startsWith("/")) throw new Error("Use the native terminal for slash commands.");
       const anchor = makeAnchor(turn, { start, end, text: quote });
       const duplicate = this.conversation.scopes.find((scope) => scope.parentId === parent.id &&
         scope.anchor?.messageId === anchor.messageId && scope.anchor.sourceStart === start && scope.anchor.sourceEnd === end &&
@@ -256,14 +292,31 @@ export class NativeWorkspace extends EventEmitter {
   }
 
   async activate(scopeId) {
+    await this.ensureTerminal(scopeId);
+    return this.view(scopeId);
+  }
+
+  async ensureTerminal(scopeId) {
     const scope = this.scope(scopeId);
     if (!this.terminalFor(scope.id)) await this.sync(scope.id);
     this.openTerminal(scope.id);
+    return scope;
+  }
+
+  view(scopeId) {
+    const scope = this.scope(scopeId);
     this.conversation.activeScopeId = scope.id;
     this.expandPath(scope);
     this.notice = null;
     this.changed();
     return scope;
+  }
+
+  viewParent(scopeId) {
+    const scope = this.scope(scopeId);
+    if (!scope.parentId) throw new Error("This conversation has no parent.");
+    scope.collapsed = true;
+    return this.view(scope.parentId);
   }
 
   back() {

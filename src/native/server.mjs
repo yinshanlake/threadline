@@ -14,6 +14,7 @@ const assets = new Map([
   ["/app.js", [path.join(directory, "web", "app.js"), "text/javascript"]],
   ["/style.css", [path.join(directory, "web", "style.css"), "text/css"]],
   ["/text.mjs", [path.join(directory, "..", "text.mjs"), "text/javascript"]],
+  ["/selection.mjs", [path.join(directory, "selection.mjs"), "text/javascript"]],
   ["/vendor/xterm.mjs", [vendor("@xterm/xterm", "lib/xterm.mjs"), "text/javascript"]],
   ["/vendor/fit.mjs", [vendor("@xterm/addon-fit", "lib/addon-fit.mjs"), "text/javascript"]],
   ["/vendor/unicode.mjs", [vendor("@xterm/addon-unicode-graphemes", "lib/addon-unicode-graphemes.mjs"), "text/javascript"]],
@@ -77,13 +78,20 @@ export async function startNativeServer({ workspace, port = 0 }) {
         if (request.method === "GET" && pathname === "/api/state") { send(response, 200, workspace.state()); return; }
         if (request.method !== "POST") { send(response, 404, { error: "Unknown action." }); return; }
         const input = await jsonBody(request);
+        if (pathname === "/api/selection") {
+          const selection = await workspace.resolveSelection(input);
+          send(response, 200, { selection, state: workspace.state() }); return;
+        }
         if (pathname === "/api/branch") await workspace.branch(input);
         else if (pathname === "/api/collapse") await workspace.collapse(input);
         else if (pathname === "/api/new") await workspace.newConversation();
         else if (pathname === "/api/send") await workspace.sendMessage(input);
         else if (pathname === "/api/activate") await workspace.transaction(() => workspace.activate(input.scopeId));
+        else if (pathname === "/api/view") await workspace.transaction(() => workspace.view(input.scopeId));
+        else if (pathname === "/api/view-back") await workspace.transaction(() => workspace.viewParent(input.scopeId));
+        else if (pathname === "/api/terminal") await workspace.transaction(() => workspace.ensureTerminal(input.scopeId));
         else if (pathname === "/api/back") await workspace.transaction(() => workspace.back());
-        else if (pathname === "/api/refresh") await workspace.transaction(() => workspace.sync());
+        else if (pathname === "/api/refresh") await workspace.transaction(() => workspace.sync(input.scopeId));
         else { send(response, 404, { error: "Unknown action." }); return; }
         send(response, 200, workspace.state()); return;
       }

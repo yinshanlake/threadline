@@ -78,10 +78,73 @@ test("native fork preserves the parent, exact UTF-16 anchor, and native startup 
 test("a stale or invalid selection fails before any provider fork", async () => {
   const { workspace, passage, forks } = fixture();
   try {
-    for (const change of [{ quote: "stale" }, { start: -1 }, { end: 1000 }, { question: " " }]) {
+    for (const change of [{ quote: "stale" }, { start: -1 }, { end: 1000 }, { question: " " }, { question: "/future-command --arg value" }]) {
       await assert.rejects(workspace.branch({ ...passage(), ...change }));
     }
     assert.equal(forks.length, 0);
+  } finally { await workspace.close(); }
+});
+
+test("view navigation does not reopen a terminal or disturb another native draft", async () => {
+  const { workspace, root, passage } = fixture();
+  try {
+    await workspace.initialize();
+    const parent = workspace.terminalFor(root.id);
+    parent.terminal.write("unfinished main input");
+    const child = await workspace.branch(passage());
+    const native = workspace.terminalFor(child.id);
+    native.terminal.close();
+    workspace.view(root.id);
+    workspace.view(child.id);
+    assert.equal(workspace.terminalFor(child.id), undefined);
+    workspace.viewParent(child.id);
+    assert.equal(workspace.scope().id, root.id);
+    assert.equal(child.collapsed, true);
+    await workspace.ensureTerminal(child.id);
+    assert.equal(workspace.scope().id, root.id);
+    assert.notEqual(workspace.terminalFor(child.id).id, native.id);
+    assert.equal(workspace.terminalFor(root.id), parent);
+    assert.deepEqual(parent.terminal.writes, ["unfinished main input"]);
+  } finally { await workspace.close(); }
+});
+
+test("native selection validates the live terminal binding and rejects stale source identities before forking", async () => {
+  const { workspace, root, threads, forks } = fixture();
+  try {
+    await workspace.initialize();
+    const terminal = workspace.terminalFor(root.id);
+    const input = { terminalId: terminal.id, scopeId: root.id, threadId: root.providerThreadId, text: "中文 🌱 stays anchored." };
+    const selected = await workspace.resolveSelection(input);
+    assert.equal(forks.length, 0);
+    assert.equal(selected.quote, input.text);
+    await assert.rejects(workspace.resolveSelection({ ...input, threadId: randomUUID() }), /session changed/u);
+    await assert.rejects(workspace.branch({ ...selected, sourceThreadId: randomUUID(), question: "Why?" }), /source session changed/u);
+    await assert.rejects(workspace.branch({ ...selected, providerTurnId: "wrong-turn", question: "Why?" }), /source turn changed/u);
+    const next = { id: randomUUID(), name: "Native switched session", turns: [] };
+    threads.set(next.id, next);
+    await workspace.notification({ terminalId: terminal.id, threadId: next.id });
+    assert.notEqual(terminal.scopeId, root.id);
+    assert.equal(workspace.terminalFor(terminal.scopeId), terminal);
+    await assert.rejects(workspace.branch({ ...selected, question: "Preserve my draft" }), /native source session changed/u);
+    assert.equal(forks.length, 0);
+    assert.equal(root.turns.length, 1);
+  } finally { await workspace.close(); }
+});
+
+test("inherited native selections retain source identity and cannot claim an unrelated turn", async () => {
+  const { workspace, root, passage, forks } = fixture();
+  try {
+    const child = await workspace.branch(passage());
+    const entry = workspace.terminalFor(child.id);
+    const inherited = await workspace.resolveSelection({
+      terminalId: entry.id, scopeId: child.id, threadId: child.providerThreadId, text: "中文 🌱 stays anchored.",
+    });
+    assert.equal(inherited.scopeId, root.id);
+    assert.equal(inherited.origin.scopeId, child.id);
+    assert.equal(forks.length, 1);
+    child.native.inheritedTurnIds = [];
+    await assert.rejects(workspace.branch({ ...inherited, question: "Another angle" }), /does not belong/u);
+    assert.equal(forks.length, 1);
   } finally { await workspace.close(); }
 });
 

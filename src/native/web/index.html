@@ -12,46 +12,58 @@
   <header class="toolbar">
     <div class="brand">Threadline <span id="runtime-mode">Codex</span></div>
     <div id="workspace-path" class="workspace-path"></div>
-    <button id="new-conversation">New conversation</button>
-    <button id="toggle-panel" aria-controls="sidebar" aria-expanded="true">Conversation <kbd>Ctrl+Shift+B</kbd></button>
+    <button id="new-conversation" title="Start a new main native conversation">New main</button>
+    <button id="toggle-panel" aria-controls="sidebar" aria-expanded="false">Follow-ups <kbd>Ctrl+Shift+B</kbd></button>
     <button id="toggle-terminal" aria-controls="terminal-pane" aria-expanded="true">Terminal <kbd>Ctrl+Shift+`</kbd></button>
   </header>
-  <main id="layout" class="layout">
+  <main id="layout" class="layout panel-hidden">
     <section id="terminal-pane" class="terminal-pane" aria-label="Codex terminal">
       <div class="terminal-toolbar">
         <span id="active-title">Main conversation</span>
+        <button id="terminal-ask" aria-keyshortcuts="Control+Shift+A" title="Select terminal text, then ask here or press Ctrl+Shift+A">Ask about selection</button>
+        <button id="main-terminal" hidden>Back to main terminal</button>
         <span id="connection" role="status">Connecting</span>
       </div>
       <div id="terminal"></div>
-      <div class="terminal-footer">Native Codex handles input, tools and approvals here.</div>
+      <div id="terminal-alerts" class="terminal-alerts" aria-live="polite"></div>
+      <div class="terminal-footer">Native Codex owns input, slash commands, tools and approvals. Select text, then right-click or press Shift+F10 to ask.</div>
     </section>
-    <aside id="sidebar" class="sidebar" aria-label="Conversation branches">
+    <aside id="sidebar" class="sidebar" aria-label="Follow-up workspace" hidden>
       <div class="panel-toolbar">
-        <div class="panel-heading"><h1>Conversation</h1><p>Select any passage to ask a question.</p></div>
+        <div class="panel-heading"><h1>Follow-ups</h1><p>A separate thread, anchored to your selection.</p></div>
         <button id="back" disabled>Return to parent</button>
+        <button id="close-panel" aria-label="Close follow-up pane">Close</button>
       </div>
       <div class="navigation-row">
-        <details id="history-menu"><summary>Past conversations</summary><nav id="tree" aria-label="Branch tree"></nav></details>
+        <details id="history-menu"><summary>Conversation tree</summary><nav id="tree" aria-label="Branch tree"></nav></details>
         <button id="refresh">Refresh</button>
       </div>
       <nav id="breadcrumb" aria-label="Current conversation"></nav>
-      <div id="answers" class="answers" tabindex="-1"><div id="transcript"></div><p id="transcript-empty" class="empty" hidden>Open the terminal to start a conversation. Completed replies appear here.</p></div>
-      <div id="selection-home">
+      <div id="answers" class="answers" tabindex="-1">
+        <div id="selection-home">
         <form id="follow-up" hidden>
           <div class="selection-heading"><label for="question">Follow-up on this passage</label><button id="cancel-selection" type="button" aria-label="Clear selection">Clear</button></div>
+          <p id="selection-source" class="source-identity"></p>
           <blockquote id="selected-quote"></blockquote>
           <textarea id="question" rows="3" maxlength="16000" placeholder="What would you like to explore?" required></textarea>
-          <div class="selection-actions"><span>Ctrl+Enter to send</span><button id="ask" class="primary" type="submit">Open branch</button></div>
+          <div class="selection-actions"><span>Nothing is sent until you ask</span><button id="ask" class="primary" type="submit">Ask in new thread</button></div>
         </form>
+        </div>
+        <div id="transcript"></div>
+        <p id="transcript-empty" class="empty">Your main conversation stays in the native terminal. Select an answer there and choose <strong>Ask about selection</strong>, or reopen a follow-up from the conversation tree.</p>
       </div>
       <div id="continue-bar"><span id="continue-label">Continue the current conversation</span><button id="continue-conversation">Continue in terminal</button></div>
-      <form id="composer">
-        <label id="composer-label" for="prompt">Message</label>
-        <textarea id="prompt" rows="2" maxlength="16000" placeholder="Ask a question or continue the conversation" required></textarea>
+      <form id="composer" hidden>
+        <label id="composer-label" for="prompt">Continue this follow-up</label>
+        <textarea id="prompt" rows="2" maxlength="16000" placeholder="Continue this thread without creating another branch" required></textarea>
         <div class="composer-actions"><span id="composer-status">Ctrl+Enter to send</span><button id="send" class="primary" type="submit">Send</button></div>
       </form>
-      <p id="message" role="status" hidden></p>
     </aside>
   </main>
+  <div id="native-menu" role="menu" aria-label="Selected terminal text" hidden>
+    <button id="native-menu-ask" role="menuitem">&#36861;&#38382; / Ask about selection</button>
+    <button id="native-menu-copy" role="menuitem">Copy selection</button>
+  </div>
+  <p id="message" role="status" hidden></p>
 </body>
 </html>

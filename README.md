@@ -60,9 +60,9 @@ node --test --test-name-pattern='real Codex terminal' test/console-terminal.test
 
 Normal `npm install` / `npm ci` also applies a narrowly scoped fix to the pinned Unicode grapheme addon's trie reader: Node Buffers can have a nonzero byte offset, which the upstream 0.4.0 header reader ignores. The install step checks the exact dependency version and patch shape, is safe to run again, and fails explicitly if the upstream code changes. If installing with lifecycle scripts disabled, run `npm run postinstall` before native mode. The regression suite exercises both addon formats with deliberately offset Buffers.
 
-## Native Codex with expandable conversation history
+## Native Codex with on-demand follow-ups
 
-The experimental native mode opens the actual Codex CLI alongside an expandable reading view. Parent answers, inline follow-ups, nested questions, and earlier conversations stay in one transcript. The native terminal is visible by default and can be hidden explicitly while reading; slash commands, completion, model menus, and approvals are handled by Codex itself.
+The experimental browser-native mode starts with the actual Codex CLI as the primary conversation. The follow-up workspace is collapsed by default, not a second copy of the main transcript. Slash commands, their arguments, completion, model menus, tools, and approvals remain owned by Codex; Threadline forwards terminal input bytes without maintaining a command registry.
 
 From a local checkout:
 
@@ -73,13 +73,16 @@ npm run native
 
 Open the local browser link printed in the terminal. It connects only to a server on `127.0.0.1`. The server keeps running until you press `Ctrl+C` in the launching terminal.
 
-1. Write a message in the conversation input and send with **Send** or `Ctrl+Enter`. Replies from your configured Codex model appear in the reading view. The header shows **Live Codex** for real sessions and **Offline demo** for simulated replies.
-2. Select a passage in any completed answer, including an earlier parent or child reply. A follow-up input unfolds beside the source over 480 ms; it is editable immediately, without resizing the native terminal or rebuilding the conversation tree. Cancel folds it away over 240 ms. Reduced-motion preferences skip the animation. Send with `Ctrl+Enter` or **Open branch**. The child inherits history through that answer and appears under its source paragraph.
-3. Expand or collapse a question to read its history without switching the active terminal. Selected passages inside a child can create nested follow-ups. **Past conversations** provides the full tree when needed.
-4. **Return to parent** folds the current branch and restores the source paragraph, scroll position, and previous terminal visibility. **Continue here** activates a chosen conversation and focuses its message input. Use **Terminal** for native slash commands, tools, approvals, or unfinished terminal input.
-5. **New conversation** focuses an empty message input. Sending its first message starts a fresh model session while retaining the previous conversations in the reading view. Earlier text remains selectable. Collapse state is saved with the session; page reload also restores the reading position.
+1. Chat directly in the left native terminal. The header distinguishes **Live Codex** from **Offline demo**; the latter does not connect to a model.
+2. Select text in a completed native answer, then right-click and choose **追问 / Ask about selection**. Selecting alone does not open a panel, steal focus, submit a question, or fork a session. The menu also offers **Copy selection**. With a native selection, `Shift+F10` opens the keyboard-accessible menu; `Ctrl+Shift+A` or the terminal's **Ask about selection** button opens the composer directly. Without a selection the ordinary context menu is left alone. Native mouse-reporting mode retains ownership unless you explicitly hold Shift.
+3. The selected quote is captured and mapped to known canonical completed history before the layout changes. The workspace reveals over 480 ms and accepts typing immediately, even while the server rechecks the source; sending stays disabled until that check succeeds. Send with `Ctrl+Enter` or **Ask in new thread** to create the branch. Its source conversation, answer and session identity stay visible above the quote; your questions and that branch's replies have separate role labels. Prose uses a reading font, while code retains monospace formatting.
+4. The bottom input continues the same branch. Selecting a passage in a branch's completed reply opens an inline composer for a nested branch. **Conversation tree** and breadcrumbs let you browse other branches without switching the left terminal. **Return to parent** folds the child and restores its source; returning to a main conversation closes the follow-up pane rather than duplicating that transcript.
+5. **Close** folds the pane away over 240 ms. **Follow-ups** reopens the same branch, quote, draft and reading position. Closing, browsing, sending and creating follow-ups never reconnect the main terminal or overwrite its unfinished input. **Open branch terminal** is an explicit switch for that child's native tools, approvals, slash commands or unfinished input; **Back to main terminal** returns to the existing main process. Running or blocked hidden branches also have an **open native terminal** action beside the main terminal, even while the follow-up pane is closed.
+6. **New main** deliberately starts and displays a fresh native conversation. Older sessions and branches remain in the tree, and an existing right-hand branch or draft is left in place.
 
-`Ctrl+Shift+B` toggles the conversation view. `Ctrl+Shift+Backquote` toggles the terminal. An open follow-up draft keeps its text and focus when other answers arrive. Markdown and common formula notation are rendered using Threadline's existing source mapping, so selecting formatted Chinese text, emoji, or a subscript still anchors the original raw text.
+`Ctrl+Shift+B` toggles the follow-up workspace; `Ctrl+Shift+Backquote` toggles terminal visibility while reading. Reduced-motion preferences skip both animations. Native layout changes fit the PTY at the animation boundary rather than on every animation frame. A pending question does not delay typing, and incoming replies do not pull you away after you have scrolled to read elsewhere. Branch collapse state is saved with the session; browser view, drafts and reading positions also survive page reload in the same tab.
+
+Native selection uses xterm's public selection APIs, not a DOM selection over a reconstructed terminal. Visible glyphs and their surrounding terminal lines are checked against raw canonical offsets using the existing Markdown source maps, tolerating layout whitespace, wrapping, CJK and emoji. An echoed input or tool-control line is not treated as an assistant answer just because it repeats a quote. Repeated matches are rejected rather than silently choosing the latest turn. Inherited passages are restricted to the known fork history and labeled with their original owner; later parent turns and unrelated sessions cannot become sources. Unknown terminal controls, incomplete output and unsupported renderings fail visibly without creating a branch. Select a longer, unique excerpt when a short phrase is ambiguous. A native `/new`, `/resume` or `/fork` can rebind the same terminal to a different session: its current binding is used for new selections, and a pending old selection is disabled while retaining the question draft. Copy failures are also reported explicitly.
 
 The first version supports Codex only. It prefers the Codex installation on your PATH so the terminal and session operations use the same version; `THREADLINE_CODEX_PATH` can select an explicit executable or JavaScript entrypoint. A bundled Codex is used only when no local installation is found. Model conversations still use your existing Codex login and configuration.
 
@@ -111,7 +114,14 @@ npx playwright install chromium
 npm run test:native-browser
 ```
 
-Browser tests cover inline and nested forks, historical selections from an inactive conversation, formatted Chinese/emoji/formula anchors, draft preservation, return-position restoration across reload, new conversations retaining history, literal slash input, terminal reconnection, light/dark themes, and narrow layouts. Regular tests cover session persistence, collapse state, duplicate forks, stale selections, provider limits, authenticated local requests, and PTY input/output.
+Browser tests exercise real xterm selections over an offline PTY, including mouse dragging, the right-click and keyboard menus, copied text, native mouse ownership, initially collapsed and reopened panes, no duplicated root transcript, continuing and nested branches, source rebinding, ambiguous/stale selections, wrapped Chinese/emoji/formula anchors, preserved terminal connections and drafts, scroll restoration, child attention actions, animation boundaries, reduced motion, literal slash/argument/completion bytes, and narrow layouts. Regular tests cover canonical selection mapping, inherited source identity, session persistence, collapse state, duplicate forks, provider limits, authenticated local requests, and PTY input/output. These offline tests do not establish live model connectivity.
+
+An optional bounded live browser smoke sends two prompts explicitly forbidding tools and file edits, checks the real native-selection fork, and uses separate temporary Threadline storage. It stops rather than accepting a new trust or sign-in prompt:
+
+```powershell
+$env:THREADLINE_LIVE_BROWSER_TESTS = '1'
+node --test --test-name-pattern='real Codex browser' test\native-browser.test.mjs
+```
 
 ## What it looks like
 
